@@ -1,0 +1,172 @@
+---
+title: "scRNAseq LCK experiment"
+author: "Juraj Michalik"
+date: "15/08/2025"
+output: rmdformats::material
+---
+
+This document contains the preparation of scRNAseq data for LCK experiment. Here we cluster data by hashtags.
+
+# Initialization 
+
+Load all necessary packages here.
+
+```{r libs, include=FALSE}
+knitr::opts_chunk$set(include = TRUE, warning = FALSE, message = FALSE, error = TRUE, cache = TRUE)
+#library(Seurat, lib.loc = '/usr/lib64/R/library')
+library(Seurat)
+library(future)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(cowplot)
+library(gridExtra)
+library(dbscan)
+library(scatterpie)
+library(reshape2)
+library(ggrepel)
+library(scds)
+library(SingleCellExperiment)
+
+# negation of %in% 
+`%nin%` = Negate(`%in%`)
+```
+
+Create directory, where data sets will be stored.
+
+```{r}
+dir.create("Datasets", showWarnings = FALSE, recursive = TRUE)
+```
+
+Load matrix.
+
+```{r}
+gex <- Read10X_h5('Exp_21_W1/raw_feature_bc_matrix.h5')
+
+# ID of experiment
+experiment.ID <- 'exp21'
+sample.ID <- 'D1'
+sep01 <- paste(experiment.ID, sample.ID, sep='_')
+
+hashtags <- c()
+hash.list <- list()
+```
+
+We also need to load meta data.
+
+```{r}
+# also remove all columns with only NA
+hashtags <- c()
+for(x in c(1,2,3,4,5,6,7,8,9)){
+  hashtags = c(hashtags, paste0('Mouse-Hashtag-', x))
+}
+
+meta.data.import <- read.csv('Metadata_table.csv') %>% dplyr::filter(Well_CT_ID == 'exp21_1') %>% select_if(~ !all(is.na(.) | . == '')) %>%
+  dplyr::mutate(hashtags = hashtags) %>%
+  dplyr::rename(Sample = Condition) %>%
+  dplyr::mutate(hashtags = hashtags, Condition = c('WT', 'CA', 'KO', 'WT', 'KO', 'CA', 'WT', 'KO', 'CA'))
+```
+
+Create Seurat object with hashtags in separate assay.
+
+```{r}
+exp21W1 <- CreateSeuratObject(gex$`Gene Expression`, project = 'exp21W1', min.cells = 3, min.features = 200)
+```
+
+Now compute MT and RP gene proportion for each cell and remove the genes afterwards along with VDJ genes as well. Then we reconstruct the object and we add antibodies as well.
+
+```{r}
+exp21W1[["percent.mt"]] <- PercentageFeatureSet(object = exp21W1, pattern = "^mt-")
+exp21W1[["percent.rp"]] <- PercentageFeatureSet(object = exp21W1, pattern = "^Rp[s|l]")
+
+meta.table <- exp21W1@meta.data
+
+genes.removed <- GetAssayData(exp21W1, assay = 'RNA', slot = 'counts')
+genes.removed <- genes.removed[!grepl('^Tr(a|b)(v|d|j)', rownames(genes.removed)),]
+genes.removed <- genes.removed[!grepl('^mt-', rownames(genes.removed)),]
+genes.removed <- genes.removed[!grepl('Rp(l|s)', rownames(genes.removed)),]
+
+exp21W1 <- CreateSeuratObject(genes.removed, project ='exp21W1', min.cells = 3, min.features = 200)
+exp21W1 <- AddMetaData(exp21W1, meta.table)
+ab_frame <- gex$`Antibody Capture`[,colnames(gex$`Antibody Capture`) %in% colnames(exp21W1)]
+ab_frame <- ab_frame[-4,]
+exp21W1[['Antibodies']] <-  CreateAssayObject(counts = ab_frame)
+```
+
+Plot QC elements - notably gene count, read count etc.:
+
+```{r}
+print(VlnPlot(exp21W1, features = c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.rp"), ncol = 4, pt.size = 0))
+```
+
+# Hashtag analysis
+
+Instead of usual procedure, we apply hashtag detection by Seurat. We normalize them beforehand.
+
+```{r}
+exp21W1 <- NormalizeData(object = exp21W1, assay = 'Antibodies', normalization.method = "CLR")
+exp21W1 <- HTODemux(exp21W1, assay = "Antibodies", positive.quantile = 0.99)
+```
+
+Visualize.
+
+```{r}
+Idents(exp21W1) <- "Antibodies_maxID"
+RidgePlot(exp21W1, assay = "Antibodies", features = rownames(exp21W1[["Antibodies"]])[1:2], ncol = 2)
+```
+
+# First Analysis
+
+We proceed with usual analysis, but first add meta data.
+
+```{r}
+exp21W1.meta <- exp21W1@meta.data %>%
+  left_join(meta.data.import, by =  c('hash.ID' = 'hashtags'))
+rownames(exp21W1.meta) <- colnames(exp21W1)
+exp21W1@meta.data <- exp21W1.meta
+```
+
+```{r}
+DefaultAssay(exp21W1) <- 'RNA'
+
+exp21W1 <- NormalizeData(object = exp21W1)
+exp21W1 <- FindVariableFeatures(exp21W1, selection.method = "vst", nfeatures = 1000, 
+                                verbose = FALSE)
+  
+exp21W1 <- ScaleData(exp21W1, verbose = FALSE)
+exp21W1 <- RunPCA(exp21W1, npcs = 20, verbose = FALSE)
+exp21W1 <- RunUMAP(exp21W1, reduction = "pca", dims = 1:20)
+  
+exp21W1 <- FindNeighbors(exp21W1, dims = 1:20)
+exp21W1 <- FindClusters(exp21W1, resolution = 0.4)
+```
+
+Print results.
+
+```{r,  results = F, message=FALSE, fig.width = 8}
+DimPlot(exp21W1, label = T) + ggtitle('Exp. 21 W1 - Clusters')
+VlnPlot(exp21W1, features = c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.rp"), ncol = 4, pt.size = 0)
+VlnPlot(exp21W1, features = c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.rp"), group.by = 'Condition', ncol = 4, pt.size = 0)
+```
+
+Print distribution by disease.
+
+```{r,  results = F, message=FALSE, fig.width = 8}
+DimPlot(exp21W1, group.by = 'hash.ID') + ggtitle('Exp 21 W1 - Hash')
+DimPlot(exp21W1, group.by = 'Condition') + ggtitle('Exp 21 W1 - Condition')
+DimPlot(exp21W1, group.by = 'Sample') + ggtitle('Exp 21 W1 - Sample')
+DimPlot(exp21W1, group.by = 'Sample', split.by = 'Condition', ncol = 2) + ggtitle('Exp 21 W1 - Sample')
+DimPlot(exp21W1, group.by = 'hash.ID', split.by = 'Condition', ncol = 2, cols = c('black', rainbow(9), 'gray30')) + ggtitle('Exp 21 W1 - Sample')
+```
+
+Some markers.
+
+```{r}
+FeaturePlot(exp21W1, c('Batf3', 'Cd8a', 'Cd74', 'Gzma', 'H2ac6', 'Ccl5'), ncol = 3)
+```
+
+Save initial data set.
+
+```{r,  results = F, message=FALSE}
+saveRDS(exp21W1, 'Datasets/exp21W1_init_all.rds')
+```
