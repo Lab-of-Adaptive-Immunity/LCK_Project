@@ -1,0 +1,26 @@
+sample.name,exp.num, sample.description,genotype,activation,inhibition,inhibition.code
+Sample1Bulk1,1,WT IMDM,WT,None,None,No inh
+Sample2Bulk1,1,WT IMDM+++OVA 1 µM,WT,OVA 1uM,None,No inh
+Sample3Bulk1,1,WT IMDM+++OVA 1 µM Ip38 12.5 µM,WT,OVA 1uM,Ip38 12.5 uM,Ip38
+Sample4Bulk1,1,WT IMDM+++OVA 1 µM inhERK10µM,WT,OVA 1uM,inhERK10uM,inhERK
+Sample5Bulk1,1,WT IMDM+++OVA 1 µM Cyclosporin A 0.1µM,WT,OVA 1uM,Cyclosporin A 0.1uM,Cyclosp.
+Sample6Bulk1,2,WT IMDM,WT,None,None,No inh
+Sample7Bulk1,2,WT IMDM+++OVA 1 µM,WT,OVA 1uM,None,No inh
+Sample8Bulk1,2,WT IMDM+++OVA 1 µM Ip38 12.5 µM,WT,OVA 1uM,Ip38 12.5 uM,Ip38
+Sample9Bulk1,2,WT IMDM+++OVA 1 µM inhERK10µM,WT,OVA 1uM,inhERK10uM,inhERK
+Sample10Bulk1,2,WT IMDM+++OVA 1 µM Cyclosporin A 0.1µM,WT,OVA 1uM,Cyclosporin A 0.1uM,Cyclosp.
+Sample11Bulk1,2,KO IMDM,KO,None,None,No inh
+Sample12Bulk1,2,KO IMDM+++OVA 1 µM,KO,OVA 1uM,None,No inh
+Sample13Bulk1,2,KO IMDM+++OVA 1 µM Ip38 12.5 µM,KO,OVA 1uM,Ip38 12.5 uM,Ip38
+Sample14Bulk1,2,KO IMDM+++OVA 1 µM inhERK10µM,KO,OVA 1uM,inhERK10uM,inhERK
+Sample15Bulk1,2,KO IMDM+++OVA 1 µM Cyclosporin A 0.1µM,KO,OVA 1uM,Cyclosporin A 0.1uM,Cyclosp.
+Sample1Bulk2,3,WT IMDM,WT,None,None,No inh
+Sample2Bulk2,3,WT IMDM+++OVA 1 µM,WT,OVA 1uM,None,No inh
+Sample3Bulk2,3,WT IMDM+++OVA 1 µM Ip38 12.5 µM,WT,OVA 1uM,Ip38 12.5 uM,Ip38
+Sample4Bulk2,3,WT IMDM+++OVA 1 µM inhERK10µM,WT,OVA 1uM,inhERK10uM,inhERK
+Sample5Bulk2,3,WT IMDM+++OVA 1 µM Cyclosporin A 0.1µM,WT,OVA 1uM,Cyclosporin A 0.1uM,Cyclosp.
+Sample6Bulk2,3,KO IMDM,KO,None,None,No inh
+Sample7Bulk2,3,KO IMDM+++OVA 1 µM,KO,OVA 1uM,None,No inh
+Sample8Bulk2,3,KO IMDM+++OVA 1 µM Ip38 12.5 µM,KO,OVA 1uM,Ip38 12.5 uM,Ip38
+Sample9Bulk2,3,KO IMDM+++OVA 1 µM inhERK10µM,KO,OVA 1uM,inhERK10uM,inhERK
+Sample10Bulk2,3,KO IMDM+++OVA 1 µM Cyclosporin A 0.1µM,KO,OVA 1uM,Cyclosporin A 0.1uM,Cyclosp.

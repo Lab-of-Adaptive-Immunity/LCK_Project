@@ -1,0 +1,505 @@
+---
+title: "Experiment LCK"
+author: "Juraj Michalik"
+date: "15/7/2025"
+output: rmdformats::material
+---
+
+This document contains the analysis of data from LCK experiment data.
+
+# Initialization 
+
+Load all necessary packages here.
+
+```{r libs, include=FALSE}
+knitr::opts_chunk$set(include = TRUE, warning = FALSE, message = FALSE, error = TRUE, cache = TRUE)
+library(Seurat)
+library(future)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(cowplot)
+library(gridExtra)
+library(dbscan)
+library(scatterpie)
+library(reshape2)
+library(ggrepel)
+library(scds)
+library(SingleCellExperiment)
+library(homologene)
+library(gprofiler2)
+library(STACAS)
+library(SingleR)
+library(ComplexHeatmap)
+
+source('VDJ_utilities.R')
+source('VDJ_TRUST4_import.R')
+
+# negation of %in% 
+`%nin%` = Negate(`%in%`)
+```
+
+Get cell cycle genes.
+
+```{r}
+mm.s.genes <- scGate::genes.blacklist.default$Mm$cellCycle.G1S
+mm.g2m.genes <- scGate::genes.blacklist.default$Mm$cellCycle.G2M
+```
+
+Load matrix and VDJ data. Use TRUST4 to generate results.
+
+```{r}
+gex <- Read10X_h5('raw_feature_bc_matrix.h5')
+vdj.tab <- build.trust.VDJ.table('TRUST_data.tsv')
+
+# ID of experiment
+experiment.ID <- 'exp43'
+sample.ID <- 'Lck'
+sep01 <- paste(experiment.ID, sample.ID, sep='_')
+
+hashtags <- c()
+hash.list <- list()
+for(x in c(1,2,3,5,6,9)){
+  hashtags = c(hashtags, paste0('Mouse_Hashtag_', x))
+}
+
+print(hash.list)
+
+for(i in 1:length(hashtags)){
+  hash.read <- read.csv(paste0('Hashtags/', sep01, '_',
+                               hashtags[i], '.csv'), header = FALSE)
+  
+  hash.list[[i]] <- paste(hash.read[,1], '1', sep = '-')
+  
+}
+
+doublets <- paste(read.csv('Hashtags/exp43_Lck_doublets.csv', header = FALSE)[,1], '1', sep = '-')
+```
+
+We also need to load meta data.
+
+```{r}
+# also remove all columns with only NA
+meta.data.import <- read.csv('../ScEXP-Metadata.csv') %>% dplyr::filter(Well_CT_ID == 'exp43.Lck') %>% 
+  dplyr::select_if(~ !all(is.na(.) | . == '')) %>%
+  dplyr::mutate(hashtags = hashtags)
+```
+
+Create Seurat object, then subset on cells for which we found correct hashtag combination, then add meta data descriptors.
+
+```{r}
+exp43_Lck <- CreateSeuratObject(gex$`Gene Expression`, project = 'exp43.Lck', min.cells = 3, min.features = 200)
+```
+
+Now compute MT and RP gene proportion for each cell and remove the genes afterwards along with VDJ genes as well. Then we reconstruct the object and we add antibodies as well.
+
+```{r}
+exp43_Lck[["percent.mt"]] <- PercentageFeatureSet(object = exp43_Lck, pattern = "^mt-")
+exp43_Lck[["percent.rp"]] <- PercentageFeatureSet(object = exp43_Lck, pattern = "^Rp[s|l]")
+
+meta.table <- exp43_Lck@meta.data
+
+genes.removed <- GetAssayData(exp43_Lck, assay = 'RNA', slot = 'counts')
+genes.removed <- genes.removed[!grepl('^Tr(a|b)(v|j)', rownames(genes.removed)),]
+genes.removed <- genes.removed[!grepl('^mt-', rownames(genes.removed)),]
+genes.removed <- genes.removed[!grepl('Rp(l|s)', rownames(genes.removed)),]
+
+exp43_Lck <- CreateSeuratObject(genes.removed, project = 'exp43_Lck', min.cells = 3, min.features = 200)
+exp43_Lck <- AddMetaData(exp43_Lck, meta.table)
+ab_frame <- gex$`Antibody Capture`[,colnames(gex$`Antibody Capture`) %in% colnames(exp43_Lck)]
+exp43_Lck[['Antibodies']] <-  CreateAssayObject(counts = ab_frame)
+```
+
+Now we add hashtag descriptors and meta data.
+
+```{r}
+# annotate by hashtags
+exp43_Lck <- subset(exp43_Lck, cells = colnames(exp43_Lck)[colnames(exp43_Lck) %in% unlist(hash.list)])
+ 
+exp43_Lck$hashtags <- ''
+for(i in 1:length(hashtags)){
+  exp43_Lck$hashtags[colnames(exp43_Lck) %in% hash.list[[i]]] <- hashtags[i]
+}
+
+exp43_Lck.meta <- exp43_Lck@meta.data %>%
+  left_join(meta.data.import, by =  c('hashtags' = 'hashtags'))
+rownames(exp43_Lck.meta) <- colnames(exp43_Lck)
+exp43_Lck@meta.data <- exp43_Lck.meta
+```
+
+Plot QC elements - notably gene count, read count etc.:
+
+```{r}
+print(VlnPlot(exp43_Lck, features = c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.rp"), ncol = 4, pt.size = 0))
+print(VlnPlot(exp43_Lck, features = rownames(exp43_Lck[['Antibodies']] ), ncol = 3, pt.size = 0, group.by = 'hashtags'))
+print(VlnPlot(exp43_Lck, features = rownames(exp43_Lck[['Antibodies']] ), ncol = 3, pt.size = 0, group.by = 'Mouse_ID'))
+```
+
+We add VDJ meta.data.
+
+```{r}
+exp43_Lck <- create.VDJ.metadata(exp43_Lck, vdj.tab, filter.vdj = F, generate.clonotypes = F)
+exp43_Lck$has.VDJ <- ifelse(!is.na(exp43_Lck$cdr3_A1) | !is.na(exp43_Lck$cdr3_B), 'VDJ found', 'VDJ not found')
+exp43_Lck$complete.VDJ <- ifelse(!is.na(exp43_Lck$cdr3_A1) & !is.na(exp43_Lck$cdr3_B), 'VDJ complete', 'VDJ not complete')
+```
+
+# First Analysis
+
+Prepare first base analysis.
+
+```{r}
+exp43_Lck <- NormalizeData(object = exp43_Lck)
+exp43_Lck <- FindVariableFeatures(exp43_Lck, selection.method = "vst", nfeatures = 1000, 
+                                   verbose = FALSE)
+  
+exp43_Lck <- ScaleData(exp43_Lck, verbose = FALSE)
+exp43_Lck <- RunPCA(exp43_Lck, npcs = 20, verbose = FALSE)
+exp43_Lck <- RunUMAP(exp43_Lck, reduction = "pca", dims = 1:20)
+  
+exp43_Lck <- FindNeighbors(exp43_Lck, dims = 1:20)
+exp43_Lck <- FindClusters(exp43_Lck, resolution = 0.4)
+```
+
+Print results.
+
+```{r,  results = F, message=FALSE, fig.width = 8}
+DimPlot(exp43_Lck, label = T) + ggtitle('Exp. 43 Lck - Clusters')
+VlnPlot(exp43_Lck, features = c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.rp"), ncol = 4, pt.size = 0)
+VlnPlot(exp43_Lck, features = c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.rp"), group.by = , ncol = 4, pt.size = 0)
+```
+
+Print distribution by various parameters.
+
+```{r,  results = F, message=FALSE, fig.width = 8}
+DimPlot(exp43_Lck, group.by = 'Condition') + ggtitle('Lck - Condition')
+DimPlot(exp43_Lck, group.by = 'Mouse_ID') + ggtitle('Lck - Sample')
+```
+
+Add cell cycle information. Before that, we need to get info based on which cell cycle phases will be calculated.
+
+Finally, annotate data using Immgen.
+
+```{r}
+ImmGData <- ImmGenData()
+
+exp43_Lck_counts <- GetAssayData(exp43_Lck, assay = 'RNA', layer = 'data')
+
+exp43_Lck.annot.Immgen <- SingleR(exp43_Lck_counts, ImmGData, ImmGData$label.main, fine.tune = FALSE)
+exp43_Lck$annotation <- exp43_Lck.annot.Immgen$labels
+```
+
+```{r}
+DimPlot(exp43_Lck, group.by = 'annotation', label = T) + ggtitle('Exp. 20 - MEMOS project - Annotation') + NoLegend()
+```
+
+Save initial data set.
+
+```{r,  results = FALSE, message=FALSE}
+saveRDS(exp43_Lck, 'Datasets/exp43_Lck_init.rds')
+```
+
+# Base DEA
+
+```{r}
+exp43_Lck.DEA <- FindAllMarkers(exp43_Lck, assay = 'RNA')
+print(exp43_Lck.DEA %>% group_by(cluster) %>% dplyr::arrange(p_val_adj, .by_group = TRUE) %>% dplyr::filter(row_number() <= 20))
+```
+
+# Adding WT vs. KO data
+
+We add data from separate mapping aimned at cKO vs WT.
+
+```{r}
+gex.ko_vs_wt <- Read10X_h5('Lck_variants/raw_feature_bc_matrix.h5')
+```
+
+```{r}
+ko_vs_wt_frame <- gex.ko_vs_wt$`Gene Expression`[,colnames(gex.ko_vs_wt$`Gene Expression`) %in% colnames(exp43_Lck)]
+exp43_Lck[['WTKO']] <-  CreateAssayObject(counts = ko_vs_wt_frame)
+exp43_Lck$LckWT.counts <- ko_vs_wt_frame['Lck',]
+```
+
+Plot this data.
+
+```{r}
+VlnPlot(exp43_Lck, c('wtko_Lck'), group.by = 'Mouse_ID')
+FeaturePlot(exp43_Lck, c('wtko_Lck'), split.by = 'Mouse_ID', max.cutoff = 1)
+```
+
+Add VDJ assay.
+
+```{r}
+vdj_assay <- gex$`Gene Expression`[grepl('^Tr(a|b)(v|j)', rownames(gex$`Gene Expression`)),]
+vdj_assay <- vdj_assay[,colnames(vdj_assay) %in% colnames(exp43_Lck)]
+exp43_Lck[['VDJ']] <-  CreateAssayObject(counts = vdj_assay)
+
+exp43_Lck <- NormalizeData(exp43_Lck, assay = 'VDJ')
+```
+
+Save again.
+
+```{r,  results = F, message=FALSE}
+saveRDS(exp43_Lck, 'Datasets/exp43_Lck_init.rds')
+```
+
+Calculate frequencies of reads in each exon.
+
+```{r}
+assayWT <- data.frame(counts = exp43_Lck$LckWT.counts,
+                      condition = exp43_Lck$Condition)
+```
+
+Get average counts for each condition.
+
+```{r}
+print(assayWT %>% dplyr::group_by(condition)) %>% dplyr::summarise(mean = mean(counts))
+```
+
+```{r}
+length(assayWT$count[assayWT$count == 0 & assayWT$condition == 'WT'])/length(assayWT$count[assayWT$condition == 'WT'])
+length(assayWT$count[assayWT$count == 0 & assayWT$condition == 'cLCK KO'])/length(assayWT$count[assayWT$condition == 'cLCK KO'])
+```
+
+Analyses of Lck vs. Lck WT correlation
+
+```{r}
+exp43_Lck_filt <- readRDS('Datasets/exp43_Lck_processed_new_with_vdj.rds')
+```
+
+```{r}
+raw_exp43_Lck <- GetAssayData(exp43_Lck_filt, assay = 'RNA', slot = 'counts')
+raw_exp43_LckWT <- GetAssayData(exp43_Lck_filt, assay = 'WTKO', slot = 'counts')
+
+Lck.df <- data.frame(Lck = raw_exp43_Lck['Lck',], LckWT = raw_exp43_LckWT['Lck',], Condition =  exp43_Lck_filt$Condition) 
+```
+
+Plots.
+
+```{r}
+Lck.df.WT <- Lck.df[Lck.df$Condition == 'WT',]
+Lck.df.KO <- Lck.df[Lck.df$Condition == 'cLCK KO',]
+
+ggplot(Lck.df.WT, aes(x = Lck, y = LckWT)) + geom_point() + geom_density_2d_filled(bins = 6, alpha = 0.5) + ggtitle('Lck vs. LckWT, WT mice') + theme_classic() + xlim(0, 32) + ylim(0, 32)
+ggplot(Lck.df.KO, aes(x = Lck, y = LckWT)) + geom_point() + geom_density_2d_filled(bins = 6, alpha = 0.5) + ggtitle('Lck vs. LckWT, cLCK KO mice') + theme_classic() + xlim(0, 32) + ylim(0, 32)
+
+Lck.df.WT.counted <- Lck.df.WT %>% dplyr::count(Lck, LckWT)
+Lck.df.KO.counted <- Lck.df.KO %>% dplyr::count(Lck, LckWT)
+
+ggplot(Lck.df.WT.counted, aes(x = Lck, y = LckWT, color = n)) + geom_point() + ggtitle('Lck vs. LckWT, WT mice') + theme_classic() + xlim(0, 32) + ylim(0, 32) + scale_color_gradient2(low = 'blue', mid = 'gray85', high = 'firebrick3')
+ggplot(Lck.df.KO.counted, aes(x = Lck, y = LckWT, color = n)) + geom_point() + ggtitle('Lck vs. LckWT, cLCK KO mice') + theme_classic() + xlim(0, 32) + ylim(0, 32) + scale_color_gradient2(low = 'blue', mid = 'gray85', high = 'firebrick3')
+```
+
+
+Make more advanced table.
+
+```{r}
+raw_exp43_Lck <- GetAssayData(exp43_Lck_filt, assay = 'RNA', slot = 'counts')
+raw_exp43_LckWT <- GetAssayData(exp43_Lck_filt, assay = 'WTKO', slot = 'counts')
+Lck.df.meta <- data.frame(Lck = raw_exp43_Lck['Lck',], LckWT = raw_exp43_LckWT['Lck',])
+Lck.df.meta <- cbind(Lck.df.meta, exp43_Lck_filt@meta.data) 
+
+Lck.df.meta.filt <- Lck.df.meta %>% dplyr::select(Lck, LckWT, Mouse_ID) %>%
+  dplyr::filter(LckWT == 0) 
+
+mouse_info <- Lck.df.meta %>%
+  distinct(Mouse_ID, Condition)
+
+Lck.df.LckWT.null <- Lck.df.meta.filt %>% group_by(Lck, Mouse_ID) %>%
+  dplyr::summarise(count = n()) %>% ungroup() %>% 
+  tidyr::complete(Lck, Mouse_ID, fill = list(count = 0)) %>%
+  dplyr::left_join(mouse_info, by = "Mouse_ID") %>% 
+  dplyr::group_by(Lck) %>%
+  dplyr::arrange(Condition, Mouse_ID, .by_group = T)
+
+write.csv(Lck.df.LckWT.null, 'Lck_null_mouse_counts.csv')
+```
+
+Import Cd45 data.
+
+```{r}
+Cd45_assay <- Read10X_h5('Lck_Cd45_genotyping/raw_feature_bc_matrix.h5')
+Cd45_assay <- Cd45_assay$`Gene Expression`[c('Cd45.1', 'Cd45.2'),]
+```
+
+```{r}
+Cd45_assay <- Cd45_assay[,colnames(Cd45_assay) %in% colnames(exp43_Lck_filt)]
+```
+
+```{r}
+exp43_Lck_filt[['CD45']] <- CreateAssayObject(Cd45_assay)
+```
+
+```{r}
+FeaturePlot(exp43_Lck_filt, c('Cd45.1', 'Cd45.2'))
+```
+
+```{r}
+saveRDS(exp43_Lck_filt, 'Datasets/exp43_Lck_processed_new_with_vdj_and_cd45.rds')
+```
+
+# Heatmaps by entites
+
+We make heatmaps by entites (mice split by whether they have Lck aligned to them). First, we determine whether cells are Lck+ or Lck- based on WTKO assay.
+
+```{r}
+LckWT.counts <- GetAssayData(exp43_Lck_filt, assay = 'WTKO', slot = 'counts')
+exp43_Lck_filt$Lck.exons <- ifelse(LckWT.counts['Lck',] > 0, 'Lck+', 'Lck-')
+exp43_Lck_filt$Mouse_ID.Lck.exons <- paste(exp43_Lck_filt$Mouse_ID, exp43_Lck_filt$Lck.exons, sep = '.')
+```
+
+Now make pseudobulk based on these data.
+
+```{r}
+# Make unique identifier 
+
+# Make meta-data
+exp43.Lck.bulk.meta <- exp43_Lck_filt@meta.data %>% dplyr::select(Mouse_ID.Lck.exons, Mouse_ID, Lck.exons, Condition) %>% 
+  .[!duplicated(.),] %>% dplyr::arrange(Condition, Lck.exons, Mouse_ID)
+rownames(exp43.Lck.bulk.meta) <- exp43.Lck.bulk.meta$Mouse_ID.Lck.exons
+exp43.Lck.bulk.meta <- exp43.Lck.bulk.meta %>% dplyr::select(-Mouse_ID.Lck.exons)
+
+# Get data and arrange them by cell type
+exp43.Lck.counts <- AggregateExpression(exp43_Lck_filt, group.by = 'Mouse_ID.Lck.exons', slot = 'counts', assays = 'RNA')
+colnames(exp43.Lck.counts$RNA) <- gsub('g', '', colnames(exp43.Lck.counts$RNA))
+exp43.Lck.counts$RNA <- exp43.Lck.counts$RNA[,match(rownames(exp43.Lck.bulk.meta), colnames(exp43.Lck.counts$RNA))]
+exp43.Lck.pbulk <- CreateSeuratObject(exp43.Lck.counts, project = 'E43 Lck - entities')
+exp43.Lck.pbulk <- NormalizeData(exp43.Lck.pbulk, scale.factor = 10^6)
+
+# Add Meta data
+exp43.Lck.pbulk <- AddMetaData(exp43.Lck.pbulk, exp43.Lck.bulk.meta)
+
+# Scale and calculate PCA for later
+exp43.Lck.pbulk <- ScaleData(exp43.Lck.pbulk, features = rownames(exp43.Lck.pbulk))
+exp43.Lck.pbulk <- RunPCA(exp43.Lck.pbulk, npcs = 3, features = rownames(exp43.Lck.pbulk))
+```
+
+Perform DEA on cLck KO vs WT.
+
+```{r}
+Idents(exp43_Lck_filt) <- 'Condition'
+exp43_Lck_filt.DEA <- FindMarkers(exp43_Lck_filt, assay = 'RNA', ident.1 = 'cLCK KO', ident.2 = 'WT')
+Idents(exp43_Lck_filt) <- 'seurat_clusters'
+
+write.csv(exp43_Lck_filt.DEA %>% dplyr::filter(p_val_adj < 0.05 & abs(avg_log2FC) > 0.25), 'DEA/exp43_Lck_filt_DEA_cLCKO_WT.csv')
+```
+
+Show DEA.
+
+```{r}
+print(head(exp43_Lck_filt.DEA %>% dplyr::filter(abs(avg_log2FC) > 0.25), n = 100))
+```
+
+Plot heatmap of top 100 genes.
+
+```{r, fig.width=7, fig.height=10}
+# Make blank heatmap
+colfunc <- colorRampPalette(c('blue', "gray90", 'firebrick2'))
+
+# Assemble matrix
+assay_data <- GetAssayData(exp43.Lck.pbulk)
+
+exp43.Lck.bulk.meta <- exp43.Lck.bulk.meta[c('Condition', 'Lck.exons')]
+colors.condition <- c('steelblue', 'firebrick1')
+names(colors.condition) <- c('WT', 'cLCK KO')
+colors.exons <- c('dodgerblue', 'firebrick')
+names(colors.exons) <- c('Lck+', 'Lck-')
+
+ann_colors <- list(colors.condition, colors.exons)
+names(ann_colors) <- c('Condition', 'Lck.exons')
+col_annot <- HeatmapAnnotation(df = exp43.Lck.bulk.meta, col = ann_colors,
+                               annotation_legend_param = list(
+                                 title_gp = gpar(col = 'black', fontface = 'bold'),
+                                 labels_gp = gpar(col = 'black')
+                                ))
+
+Lck.Top50.hmap <- ComplexHeatmap::Heatmap(assay_data[rownames(exp43_Lck_filt.DEA)[1:50],] %>% as.matrix %>% t %>% scale %>% t,
+                                           name = 'Z-score', color=colfunc(64), cluster_columns = F, border = NA,
+                                           top_annotation = col_annot,
+                                           row_title_rot = 0,
+                                           column_title = "Heatmap of selected genes from\nLck Murine experiment, by entities",
+                                           column_title_gp = gpar(fontface = "bold", col = 'white'),
+                                           row_names_gp = gpar(col = "black"),
+                                           row_title_gp = gpar(col = "black"),
+                                           column_names_gp = gpar(col = "black"),
+                                           heatmap_legend_param = list(
+                                             title_gp = gpar(col = 'black', fontface = 'bold'),
+                                             labels_gp = gpar(col = 'black')
+                                           ))
+
+print(Lck.Top50.hmap)
+```
+
+```{r, fig.width=5, fig.height=5}
+# Make blank heatmap
+colfunc <- colorRampPalette(c('blue', "gray90", 'firebrick2'))
+
+# Assemble matrix
+assay_data <- GetAssayData(exp43.Lck.pbulk)
+
+exp43.Lck.bulk.meta <- exp43.Lck.bulk.meta[c('Condition', 'Lck.exons')]
+colors.condition <- c('steelblue', 'firebrick1')
+names(colors.condition) <- c('WT', 'cLCK KO')
+colors.exons <- c('dodgerblue', 'firebrick')
+names(colors.exons) <- c('Lck+', 'Lck-')
+
+ann_colors <- list(colors.condition, colors.exons)
+names(ann_colors) <- c('Condition', 'Lck.exons')
+col_annot <- HeatmapAnnotation(df = exp43.Lck.bulk.meta, col = ann_colors,
+                               annotation_legend_param = list(
+                                 title_gp = gpar(col = 'black', fontface = 'bold'),
+                                 labels_gp = gpar(col = 'black')
+                                ))
+
+Lck.eff.hmap <- ComplexHeatmap::Heatmap(assay_data[c('Lck', 'Gzma', 'Gzmb', 'Klrg1', 'Klrk1', 'Ccl5', 'Trgc4', 'Trdc', 'Klrd1', 'Klre1', 'Klrc1', 'Id2', 'Isg15', 'Gzmm', 'Lrrk1', 'Serpinb6a', 'Cxcr6'),] %>% as.matrix %>% t %>% scale %>% t,
+                                        name = 'Z-score', color=colfunc(64), cluster_columns = F, border = NA,
+                                        top_annotation = col_annot,
+                                        row_title_rot = 0,
+                                        column_title = "Heatmap of selected genes from\nLck Murine experiment, by entities",
+                                        column_title_gp = gpar(fontface = "bold", col = 'white'),
+                                        row_names_gp = gpar(col = "black"),
+                                        row_title_gp = gpar(col = "black"),
+                                        column_names_gp = gpar(col = "black"),
+                                        heatmap_legend_param = list(
+                                          title_gp = gpar(col = 'black', fontface = 'bold'),
+                                          labels_gp = gpar(col = 'black')
+                                          ))
+
+print(Lck.eff.hmap)
+```
+
+Filter out strange cells:
+- Those that have cdr3a that is different from CAASDNYQLIW or those with cdr3b different CASSRANYEQYF, or any second cdr3a chain
+- Those that have CD45.1
+- Those with 0 Lck raw counts
+
+First mark cells by whit OT-I they possess
+
+```{r}
+exp43_Lck_finalized <- exp43_Lck_filt 
+exp43_Lck_finalized$OT.I <- 'OT-I not disproved'
+exp43_Lck_finalized$OT.I[!(is.na(exp43_Lck_finalized$cdr3_B) | (adist(exp43_Lck_finalized$cdr3_B, 'CASSRANYEQYF') < 2))] <- 'Non OT-I'
+exp43_Lck_finalized$OT.I[!(is.na(exp43_Lck_finalized$cdr3_A1) | (adist(exp43_Lck_finalized$cdr3_A1, 'CAASDNYQLIW') < 2))] <- 'Marked'
+exp43_Lck_finalized$OT.I[exp43_Lck_finalized$OT.I == 'Marked' & !is.na(exp43_Lck_finalized$cdr3_A2) & adist(exp43_Lck_finalized$cdr3_A2, 'CAASDNYQLIW') < 2] <- 'OT-I not disproved'
+exp43_Lck_finalized$OT.I[exp43_Lck_finalized$OT.I == 'Marked'] <- 'Non OT-I'
+```
+
+Mark cells by Cd45 expression and by Lck expression.
+
+```{r}
+Cd45.counts <- GetAssayData(exp43_Lck_finalized, assay = 'CD45', slot = 'counts')['Cd45.1',]
+gene.counts <- GetAssayData(exp43_Lck_finalized, assay = 'RNA', slot = 'counts')['Lck',]
+
+exp43_Lck_finalized$Cd45.count <- Cd45.counts
+exp43_Lck_finalized$Lck.full.count <- gene.counts 
+```
+
+Filtering.
+
+```{r}
+exp43_Lck_finalized <- subset(exp43_Lck_finalized, OT.I == 'OT-I not disproved' & Cd45.count == 0 & Lck.full.count > 0)
+```
+
+```{r}
+saveRDS(exp43_Lck_finalized, 'Datasets/exp43_Lck_processed_filt_Lck_OTI_Ly51.rds')
+```
+

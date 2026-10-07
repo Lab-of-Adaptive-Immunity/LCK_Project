@@ -1,0 +1,1685 @@
+---
+title: "Lck bulk RNA seq fig generation"
+author: "Juraj Michalik"
+date: "2023-10-12"
+output: html_document
+---
+
+Finalized analysis for RNA seq of bulk RNA seq data of Lck. THIS IS THE FINAL VERSION!
+
+```{r}
+library(glue)
+library(DESeq2)
+library(GenomicFeatures)
+library(GenomicAlignments)
+library(tximport)
+library(magrittr)
+library(ggplot2)
+library(pheatmap)
+library(RColorBrewer)
+library(gplots)
+library(dplyr)
+library(tidyr)
+library(ggrepel)
+library(Rsubread)
+
+library(ComplexHeatmap)
+library(RColorBrewer)
+library(stringr)
+
+# annotation libs
+library(clusterProfiler)
+library("org.Mm.eg.db")
+library(AnnotationHub)
+
+library(goseq)
+library(msigdbr)
+library(fgsea)
+```
+
+Function to transform inserted meta data table into ann_colors object for ComplexHeatmap annotation.
+
+```{r}
+create.annotation.colors <- function(meta.data) {
+  ann.colors <- list()
+  
+  palette <- paste0('Set', rep(1:3, length.out = 5))
+  
+  i = 1
+  for (col.name in colnames(meta.data)) {
+    unique.levels <- unique(meta.data[[col.name]])
+    num.levels <- length(unique.levels)
+    
+    col.pal <- colorRampPalette(brewer.pal(8, palette[i]))(num.levels) # Extend colors
+    
+    # Assign colors with names
+    ann.colors[[col.name]] <- setNames(col.pal, unique.levels)
+    i <- i + 1
+  }
+  
+  return(ann.colors)
+}
+```
+
+Function for reannotation and PCA.
+
+```{r}
+# Get current Mus Musculus database from AnnotationHub if not downloaded already
+getEnsMm109 <- function(){
+  aHu <- AnnotationHub()
+  return(aHu[["AH109655"]])
+}
+
+# adds annotation to object
+reannotate <- function(dds.obj, keyslist = row.names(dds.obj)){
+  EnsMm109 <- getEnsMm109()
+  symbol.vector <- mapIds(EnsMm109,
+                          keys = row.names(dds.obj),
+                          column = "SYMBOL",
+                          keytype = "GENEID",
+                          multiVals = "first")
+  # rename only if symbol is a thing
+  row.names(dds.obj) <- ifelse(is.na(symbol.vector) | symbol.vector == '', row.names(dds.obj), symbol.vector)
+  row.names(dds.obj) <- make.unique(rownames(dds.obj))
+  return(dds.obj)    
+}
+
+# returns PCA data with more PCs (12 I think)
+get.complete.PCA.data <- function(dds.rlog.obj, ntop = 500){
+	rvar <- rowVars(assay(dds.rlog.obj))
+	select <- order(rvar, decreasing=TRUE)[seq_len(min(ntop, length(rvar)))]
+	pca.dat <- prcomp(t(assay(dds.rlog.obj)[select,]))
+	return(pca.dat)
+}
+```
+
+Function to make GSEA plot. Returns ggplot object.
+
+```{r}
+# Helper function to help plot data
+printGSEA_pars <- function(title, GSEA_res, row_num){
+  printed.str <- paste0(title, '\n', '(pval: ', formatC(GSEA_res[row_num,2] %>% as.numeric(), format = "E", digits = 2) , 
+                        ', ES: ', round(GSEA_res[row_num, 5],3), 
+                        ', NES: ', round(GSEA_res[row_num, 6],3), ', size: ', GSEA_res[row_num, 7], ')')
+  return(printed.str)
+}
+
+# Plots GSEA
+# - GSE_data: data to plot, export from plotEnrichment function
+# - title: title of plot
+# - GSEA_res: results to show in title
+# - row_num: row of GSEA results to show results of (in title)
+# - title.size: size of letters for title
+# Returns gsea object
+plotGSEA <- function(GSE_data, title, GSEA_res, row_num, title.size = 14){
+  # Calculate intersects - required for area computations
+  GSE_data.area51 <- GSE_data %>% as.data.frame
+  i <- nrow(GSE_data.area51)
+  while(i > 1){
+    if(GSE_data.area51$ES[i-1] * GSE_data.area51$ES[i] < 0){
+      ratio <- abs(GSE_data.area51$ES[i-1])/(abs(GSE_data.area51$ES[i-1]) + abs(GSE_data.area51$ES[i]))
+      rank.cross <- GSE_data.area51$rank[i-1] + (GSE_data.area51$rank[i] - GSE_data.area51$rank[i-1]) * ratio
+      GSE_data.area51 <- tibble::add_row(GSE_data.area51, rank = rank.cross, ES = 0, .before = i)
+    }
+    i <- i - 1
+  }
+  
+  # plot
+  ggplot.obj <- ggplot(GSE_data, aes(x = rank, y = ES))+
+    geom_line(color = "#2E86AB", linewidth = 1.2) +
+    geom_hline(yintercept = 0, color = "black", linewidth = 0.5) +
+    geom_hline(aes(yintercept = ifelse(abs(max(ES)) > abs(min(ES)), max(ES), min(ES))), color = "firebrick3", linetype = 'dashed') +
+    geom_area(data = GSE_data.area51, mapping = aes(x = rank, y = ifelse(ES > 0, ES, 0)), fill = "#ACADFF", alpha = 0.3) +
+    geom_area(data = GSE_data.area51, mapping = aes(x = rank, y = ifelse(ES < 0, ES, 0)), fill = "firebrick1", alpha = 0.3) +
+    geom_segment(
+      aes(x = rank,
+          xend = rank,
+          y = -max(abs(ES))*0.05,
+          yend = max(abs(ES))*0.05),
+      linewidth = 0.3
+    ) + theme_classic() +
+    ggtitle(printGSEA_pars(title, GSEA_res, row_num)) +
+    ylab('Enrichment Score (ES)') +
+    theme(axis.title = element_text(face = "bold"),
+          plot.title = element_text(hjust = 0.5, face = 'bold', size = title.size))
+  
+  return(ggplot.obj)
+}
+```
+
+Finally we setup paths to directories and files, plus some statistics.
+Bamfiles were generated by STAR 2.7.10, reference with the same software from the gtf file below and GRCm39 assembly.
+
+```{r}
+page.title <- "Lck data analysis - combined run"
+bam.path <- "/your_path/BAM/"
+gtf.path <- "Mus_musculus.GRCm39.109.gtf"
+sample.path <- "Sample_sheet.csv"
+
+# filtering statistic
+padj.max <- 0.01
+lfc.min <- 0.6
+```
+
+Create directories where figures and data will be stored.
+
+```{r}
+dir.create('Main_figures', showWarnings = FALSE)
+dir.create('Supplemental_figures', showWarnings = FALSE)
+dir.create('Pathways/Filtered_any', showWarnings = FALSE)
+dir.create('Images', showWarnings = FALSE)
+dir.create('Data', showWarnings = FALSE)
+```
+
+# Building count table
+
+```{r}
+files <- list.files(bam.path, pattern = "\\.bam$")
+files <- paste0(bam.path, files) %>% gtools::mixedsort()
+
+# get reference and set it up
+(txdb <- makeTxDbFromGFF(gtf.path, format = "gtf", circ_seqs = character()))
+ebg <- exonsBy(txdb, by = "gene")
+
+# quantification step
+expcounts <- summarizeOverlaps(features = ebg,
+                               reads = files,
+                               mode = "Union",
+                               ignore.strand = FALSE,
+                               preprocess.reads = invertStrand,
+                               singleEnd = FALSE, 
+                               fragments = TRUE)
+```
+
+```{r}
+# remove bam from colnames
+colnames(expcounts) <- gsub('Aligned.sortedByCoord.out.bam', '', colnames(expcounts))
+```
+
+Load sample tab. Additionally, we need to create combined parameter, as we'll need to compute contrasts for those.
+
+```{r}
+sample_tab <- read.csv(sample.path) %>% dplyr::mutate(genotype.act.inh = paste(genotype, activation, inhibition))
+```
+
+Reorder samples in expcounts to match those in sample tab.
+
+```{r}
+idx.reord <- match(sample_tab$sample.name, colnames(expcounts))
+
+expcounts <- expcounts[,idx.reord]
+```
+
+Verify.
+
+```{r}
+# Consistency check, must be TRUE
+identical(as.character(sample_tab$sample.name), colnames(expcounts))
+
+# Should be already ordered by mixedsort
+rownames(sample_tab) <- as.character(sample_tab$sample.name)
+colData(expcounts) <- DataFrame(sample_tab)
+```
+
+```{r}
+round(colSums(assay(expcounts)) / 1e6, 1)
+```
+
+# Preparation of DESeq2 object
+
+Here we prepare DESeq object. We want to take into account KO factor but also activation. Finally, there may be differences between Experiments. Design must account for all of these variables. We also remove low-count, noisy genes and reannotate data.
+
+```{r}
+dds_bulk_Lck.full_data <- DESeqDataSet(expcounts, design = ~ exp.num + genotype.act.inh)
+rowData(dds_bulk_Lck.full_data)$EnsemblID <- rownames(expcounts)
+dds_bulk_Lck.full_data <- dds_bulk_Lck.full_data[rowSums(counts(dds_bulk_Lck.full_data)) > 10, ] # remove <= 10 counts = noise
+dds_bulk_Lck.full_data <- reannotate(dds_bulk_Lck.full_data)
+```
+
+```{r}
+dds_bulk_Lck.full_data <- DESeq(dds_bulk_Lck.full_data)
+```
+
+Save the object.
+
+```{r}
+saveRDS(dds_bulk_Lck.full_data, 'Data/Lck_dds_full.rds')
+```
+
+Write also full assay as CSV file.
+
+```{r}
+write.csv(assay(dds_bulk_Lck.full_data), 'Lck_all_samples_raw_counts_annotated.csv')
+```
+
+# QC analysis
+
+We perform blinded analysis that is not dependent from design.
+
+```{r}
+rlog_bulk.blinded.full_data <- rlog(dds_bulk_Lck.full_data, blind = TRUE)
+```
+
+## PCA
+
+Compute and prepare blinded PCA.
+
+```{r}
+blinded_pca_full_data_cmp <- get.complete.PCA.data(rlog_bulk.blinded.full_data)
+blinded_pca_full_data <- blinded_pca_full_data_cmp$x %>% as.data.frame %>% cbind(., colData(dds_bulk_Lck.full_data)) %>% 
+  dplyr::mutate(act.inhibitor = paste(activation, inhibition, sep = '-'),
+                act.inhibitor = gsub('-None','', act.inhibitor),
+                exp.desc = paste('Exp', exp.num))
+
+                
+# get fraction of variability captured by each PC
+blinded_pca_full_data_Var <- blinded_pca_full_data_cmp$sdev^2/sum(blinded_pca_full_data_cmp$sdev^2)
+```
+
+```{r}
+blinded.pca12.full_data.base <- ggplot(blinded_pca_full_data, aes(x = PC1, y = PC2, color = genotype, shape = act.inhibitor)) +
+  geom_point(size = 5) +
+  labs(color = "activator/inhibitor") +  
+  scale_color_manual(values = c('firebrick1', 'forestgreen')) +
+  ggtitle(paste0('LCK bulk RNAseq - Normalized PCA (design-blind, PC1 + PC2)' )) +
+  xlab(paste0("PC1: ", round(blinded_pca_full_data_Var[1]*100), "% variance")) +
+  ylab(paste0("PC2: ", round(blinded_pca_full_data_Var[2]*100), "% variance")) +
+  theme_classic()
+
+blinded.pca23.full_data.base <- ggplot(blinded_pca_full_data, aes(x = PC2, y = PC3, color = genotype, shape = act.inhibitor)) +
+  geom_point(size = 5) +
+  labs(color = "activator/inhibitor") +
+  scale_color_manual(values = c('firebrick1', 'forestgreen')) +
+  ggtitle(paste0('LCK bulk RNAseq - Normalized PCA (design-blind, PC2 + PC3)' )) +
+  xlab(paste0("PC2: ", round(blinded_pca_full_data_Var[2]*100), "% variance")) +
+  ylab(paste0("PC3: ", round(blinded_pca_full_data_Var[3]*100), "% variance")) +
+  theme_classic()
+
+blinded.pca12.full_data <- blinded.pca12.full_data.base +
+  geom_text_repel(aes(label = paste(exp.desc)), seed = 120)
+
+#pca12.blank <- pca12.base +
+#  geom_text_repel(aes(label = Sample), seed = 120, color = NA, segment.color = 'white') +
+#  theme(
+#    text = element_text(color = "white"),
+#    legend.text = element_text(color = "white"),
+#    legend.title = element_text(color = "white"),
+#    strip.text = element_text(color = "white"),
+#    axis.text.x = element_text(color = "white"),
+#    axis.text.y = element_text(color = "white"))
+
+blinded.pca23.full_data <- blinded.pca23.full_data.base +
+  geom_text_repel(aes(label = paste(exp.desc)), seed = 120)
+
+#pca23.blank <- pca23.base +
+#  geom_text_repel(aes(label = Sample), seed = 120, color = NA, segment.color = 'white') +
+#  theme(
+#    text = element_text(color = "white"),
+#    legend.text = element_text(color = "white"),
+#    legend.title = element_text(color = "white"),
+#    strip.text = element_text(color = "white"),
+#    axis.text.x = element_text(color = "white"),
+#    axis.text.y = element_text(color = "white"))
+
+print(blinded.pca12.full_data)
+print(blinded.pca23.full_data)
+```
+
+```{r}
+tiff('Images/Lck_bulk_all_full_PCA_blinded_PC1_PC2.tiff', width = 700, height = 500, res = 100)
+print(blinded.pca12.full_data)
+dev.off()
+
+tiff('Images/Lck_bulk_PCA_all_full_blinded_PC2_PC3.tiff', width = 700, height = 500, res = 100)
+print(blinded.pca23.full_data)
+dev.off()
+
+```
+
+# Save data
+
+We calculate normalized count table.
+
+```{r}
+Lck_normalized_full <- counts(dds_bulk_Lck.full_data, normalized = TRUE)
+```
+
+Write it also to file, along with raw data.
+
+```{r}
+write.csv(counts(dds_bulk_Lck.full_data), 'Data/Lck_all_runs_table_full.csv')
+write.csv(Lck_normalized_full, 'Data/Lck_all_runs_bulk_normalized_table_full.csv')
+```
+
+# Preparation of DESeq object from exp2 and exp3 and gene filtering
+
+Now we make DESeq object from exp2 and exp3 only. The data will be made from filtered count matrix, where genes will be kept according to the filtering, and exp1 will be thrown away. We then filter sequences out.
+
+```{r}
+expcounts.subs <- expcounts[,6:25]
+```
+
+Make DDS object.
+
+```{r}
+dds_bulk_Lck.data <- DESeqDataSet(expcounts.subs, design = ~ exp.num + genotype.act.inh)
+rowData(dds_bulk_Lck.data)$EnsemblID <- rownames(expcounts.subs)
+dds_bulk_Lck.data <- dds_bulk_Lck.data[rowSums(counts(dds_bulk_Lck.data)) > 10, ] # remove <= 10 counts = noise
+dds_bulk_Lck.data <- reannotate(dds_bulk_Lck.data)
+```
+
+Run DESeq, to re-normalize.
+
+```{r}
+dds_bulk_Lck.data <- DESeq(dds_bulk_Lck.data)
+```
+
+Next we will compute the list of pathways that we'll test enrichment for. First, we'll pre-filter normalized count table so at least two samples from exp2 and at least 2 samples from exp3 have higher normalized count than 16.
+
+```{r}
+exp.num <- colData(dds_bulk_Lck.data)$exp.num
+norm.counts <- counts(dds_bulk_Lck.data, normalized = TRUE)
+
+keep <- rowSums(norm.counts[, exp.num == 2, drop = FALSE] >= 16) >= 2 &
+        rowSums(norm.counts[, exp.num == 3, drop = FALSE] >= 16) >= 2
+
+dds_bulk_Lck.data <- dds_bulk_Lck.data[keep, ]
+```
+
+Rerun DESeq on filtered data.
+
+```{r}
+dds_bulk_Lck.data <- DESeq(dds_bulk_Lck.data)
+```
+
+Save the object.
+
+```{r}
+saveRDS(dds_bulk_Lck.data, 'Data/Lck_dds_exp2_exp3.rds')
+```
+
+Get rlog values.
+
+```{r}
+rlog_bulk.blinded.data <- rlog(dds_bulk_Lck.data, blind = TRUE)
+```
+
+## PCA
+
+We show PCA again, this time for exp2 and3 only.
+
+```{r}
+blinded_pca_data_cmp <- get.complete.PCA.data(rlog_bulk.blinded.data)
+blinded_pca_data <- blinded_pca_data_cmp$x %>% as.data.frame %>% cbind(., colData(dds_bulk_Lck.data)) %>% 
+  dplyr::mutate(act.inhibitor = paste(activation, inhibition, sep = '-'),
+                act.inhibitor = gsub('-None','', act.inhibitor),
+                exp.desc = paste('Exp', exp.num))
+
+# get fraction of variability captured by each PC
+blinded_pca_Var <- blinded_pca_data_cmp$sdev^2/sum(blinded_pca_data_cmp$sdev^2)
+```
+
+```{r}
+blinded.pca12.base <- ggplot(blinded_pca_data, aes(x = PC1, y = PC2, color = genotype, shape = act.inhibitor)) +
+  geom_point(size = 5) +
+  labs(color = "activator/inhibitor") +  
+  scale_color_manual(values = c('firebrick1', 'forestgreen')) +
+  ggtitle(paste0('LCK bulk RNAseq - Normalized PCA (design-blind, PC1 + PC2)' )) +
+  xlab(paste0("PC1: ", round(blinded_pca_Var[1]*100), "% variance")) +
+  ylab(paste0("PC2: ", round(blinded_pca_Var[2]*100), "% variance")) +
+  theme_classic()
+
+blinded.pca23.base <- ggplot(blinded_pca_data, aes(x = PC2, y = PC3, color = genotype, shape = act.inhibitor)) +
+  geom_point(size = 5) +
+  labs(color = "activator/inhibitor") +
+  scale_color_manual(values = c('firebrick1', 'forestgreen')) +
+  ggtitle(paste0('LCK bulk RNAseq - Normalized PCA (design-blind, PC2 + PC3)' )) +
+  xlab(paste0("PC2: ", round(blinded_pca_Var[2]*100), "% variance")) +
+  ylab(paste0("PC3: ", round(blinded_pca_Var[3]*100), "% variance")) +
+  theme_classic()
+
+blinded.pca12 <- blinded.pca12.base +
+  geom_text_repel(aes(label = paste(exp.desc)), seed = 120)
+
+#pca12.blank <- pca12.base +
+#  geom_text_repel(aes(label = Sample), seed = 120, color = NA, segment.color = 'white') +
+#  theme(
+#    text = element_text(color = "white"),
+#    legend.text = element_text(color = "white"),
+#    legend.title = element_text(color = "white"),
+#    strip.text = element_text(color = "white"),
+#    axis.text.x = element_text(color = "white"),
+#    axis.text.y = element_text(color = "white"))
+
+blinded.pca23 <- blinded.pca23.base +
+  geom_text_repel(aes(label = paste(exp.desc)), seed = 120)
+
+#pca23.blank <- pca23.base +
+#  geom_text_repel(aes(label = Sample), seed = 120, color = NA, segment.color = 'white') +
+#  theme(
+#    text = element_text(color = "white"),
+#    legend.text = element_text(color = "white"),
+#    legend.title = element_text(color = "white"),
+#    strip.text = element_text(color = "white"),
+#    axis.text.x = element_text(color = "white"),
+#    axis.text.y = element_text(color = "white"))
+
+print(blinded.pca12)
+print(blinded.pca23)
+```
+
+# Save data
+
+We calculate normalized count table.
+
+```{r}
+Lck_normalized <- counts(dds_bulk_Lck.data, normalized = TRUE)
+```
+
+Write it also to file, along with raw data.
+
+```{r}
+write.csv(counts(dds_bulk_Lck.data), 'Data/Lck_all_runs_table_exp2_exp3.csv')
+write.csv(Lck_normalized, 'Data/Lck_all_runs_bulk_normalized_table_exp2_exp3.csv')
+```
+
+# Preparation of pathways
+
+Next we will compute the list of pathways that we'll test enrichment for. First, we pre-filter data to values based on genes filtered from exp2 and exp3-containing data.
+
+```{r}
+Lck_normalized_full_filt <- Lck_normalized_full[rownames(Lck_normalized_full) %in% rownames(dds_bulk_Lck.data),]
+```
+
+Now we keep only samples from first experiment, that will be used for creation of pathway lists. We also calculate log2(x + 1) (pseudocount) values.
+
+```{r}
+CountTable_filt <- Lck_normalized_full_filt[,c(1:5)]
+CountTable_log2 <- log2(CountTable_filt + 1)
+rownames(CountTable_log2) <- rownames(CountTable_log2)
+
+colnames(CountTable_log2) <- c("NA", "OVA", "OVA+p38i", "OVA+Erki", "OVA+NFATi")
+```
+
+Prepare function to filter genes.
+
+```{r}
+filter_gene_list <- function(list_name, contrast_col, direction, suffix_label, fc1.2 = log2(1.2)) {
+  genes <- read.csv(
+    paste0("Pathways/Unfiltered/", list_name, ".csv"),
+    header = FALSE,
+    stringsAsFactors = FALSE
+  )[[1]]
+  
+  genes_present <- unique(genes[genes %in% rownames(CountTable_log2)])
+  
+  tab <- data.frame(
+    Gene = genes_present,
+    OVA = CountTable_log2[genes_present, "OVA"],
+    Inhibitor = CountTable_log2[genes_present, contrast_col],
+    Delta = CountTable_log2[genes_present, contrast_col] - CountTable_log2[genes_present, "OVA"],
+    row.names = NULL
+  )
+  
+  if (direction == "down") {
+    filtered_any <- tab$Gene[tab$Delta < 0]
+    filtered_1.2x <- tab$Gene[tab$Delta <= -fc1.2]
+    cat("Genes down in", contrast_col, "vs OVA:", length(filtered_any), "\n")
+    cat("Genes down at least 1.2-fold:", length(filtered_1.2x), "\n")
+  } else if (direction == "up") {
+    filtered_any <- tab$Gene[tab$Delta > 0]
+    filtered_1.2x <- tab$Gene[tab$Delta >= fc1.2]
+    cat("Genes up in", contrast_col, "vs OVA:", length(filtered_any), "\n")
+    cat("Genes up at least 1.2-fold:", length(filtered_1.2x), "\n")
+  } else {
+    stop("direction must be 'down' or 'up'")
+  }
+  
+  cat("\n---", list_name, "---\n")
+  cat("Genes in input list:", length(genes), "\n")
+  cat("Genes found in table:", length(genes_present), "\n")
+  
+  write.table(
+    filtered_any,
+    paste0("Pathways/Filtered_any/", list_name, "_filtered_any", suffix_label, ".csv"),
+    sep = ",",
+    row.names = FALSE,
+    col.names = FALSE,
+    quote = FALSE
+  )
+  
+  write.table(
+    filtered_1.2x,
+    paste0("Pathways/Filtered/", list_name, "_filtered_1.2x.csv"),
+    sep = ",",
+    row.names = FALSE,
+    col.names = FALSE,
+    quote = FALSE
+  )
+  
+  return(tab)
+}
+```
+
+Use the above and table of genes to generate gene lists.
+
+```{r}
+NFATUP_table <- filter_gene_list("NFATUP", "OVA+NFATi", "down", "UP")
+NFATDOWN_table <- filter_gene_list("NFATDOWN", "OVA+NFATi", "up", "DOWN")
+
+ERKUP_table <- filter_gene_list("ERKUP", "OVA+Erki", "down", "UP")
+ERKDOWN_table <- filter_gene_list("ERKDOWN", "OVA+Erki", "up", "DOWN")
+
+P38UP_table <- filter_gene_list("P38UP", "OVA+p38i", "down", "UP")
+P38DOWN_table <- filter_gene_list("P38DOWN", "OVA+p38i", "up", "DOWN")
+
+# Validation
+summary(ERKUP_table$Delta)
+head(ERKUP_table[order(ERKUP_table$Delta),])
+tail(ERKUP_table[order(ERKUP_table$Delta),])
+```
+
+Generate top 250 Activated/Inhibited gene pathway.
+
+```{r}
+delta_OVA <- CountTable_log2[, "OVA"] - CountTable_log2[, "NA"]
+delta_OVA <- sort(delta_OVA[!is.na(delta_OVA)], decreasing = TRUE)
+
+TOP250activatedOVA <- names(delta_OVA)[1:250]
+TOP250inhibitedOVA <- names(delta_OVA)[(length(delta_OVA)-249):length(delta_OVA)]
+
+#Checks
+length(TOP250activatedOVA); length(TOP250inhibitedOVA)
+
+write.table(TOP250activatedOVA,  "Pathways/Filtered/TOP250activatedOVA.csv",  sep = ",", row.names = FALSE, col.names = FALSE, quote = FALSE)
+write.table(TOP250inhibitedOVA,  "Pathways/Filtered/TOP250inhibitedOVA.csv",  sep = ",", row.names = FALSE, col.names = FALSE, quote = FALSE)
+```
+
+# Heatmap scores generation
+
+We now plot heatmaps of combined samples from data. For this purpose, we take count data from matrix that only includes exp2 and exp3. We then apply log2(x + 1) transform on it.
+
+```{r}
+CountTable_log2 <- log2(Lck_normalized + 1)
+rownames(CountTable_log2) <- rownames(Lck_normalized)
+```
+
+Reorder data to have same samples from both experiments together
+
+```{r}
+CountTable_log2EXP <- CountTable_log2[, c(
+  "Sample6Bulk1",  "Sample1Bulk2", "Sample11Bulk1", "Sample6Bulk2",
+  "Sample7Bulk1",  "Sample2Bulk2", "Sample12Bulk1", "Sample7Bulk2",
+  "Sample8Bulk1",  "Sample3Bulk2", "Sample13Bulk1", "Sample8Bulk2",
+  "Sample9Bulk1",  "Sample4Bulk2", "Sample14Bulk1", "Sample9Bulk2",
+  "Sample10Bulk1", "Sample5Bulk2", "Sample15Bulk1", "Sample10Bulk2"
+)]
+
+colnames(CountTable_log2EXP) <- c(
+  "WT-NA-2",
+  "WT-NA-3",
+  "KO-NA-2",
+  "KO-NA-3", 
+  "WT-OVA-2",
+  "WT-OVA-3",  
+  "KO-OVA-2",
+  "KO-OVA-3",  
+  "WT-p38i-2",
+  "WT-p38i-3",  
+  "KO-p38i-2",
+  "KO-p38i-3",  
+  "WT-ERKi-2",
+  "WT-ERKi-3",  
+  "KO-ERKi-2",
+  "KO-ERKi-3",  
+  "WT-NFATi-2",
+  "WT-NFATi-3",  
+  "KO-NFATi-2",
+  "KO-NFATi-3"  
+)
+```
+
+Load gene list files we previously created.
+
+```{r}
+folder <- "Pathways/Filtered/"
+
+# gene list files - edit this vector to your actual filenames
+gene_list_files <- c(
+  "TOP250activatedOVA.csv",
+  "P38UP_filtered_1.2x.csv",
+  "ERKUP_filtered_1.2x.csv",
+  "NFATUP_filtered_1.2x.csv",
+  "NFKBall.csv",
+  "TOP250inhibitedOVA.csv",
+  "P38DOWN_filtered_1.2x.csv",
+  "ERKDOWN_filtered_1.2x.csv",
+  "NFATDOWN_filtered_1.2x.csv"
+)
+```
+
+We now load the function that will be used to calculate values, that will be then plotted to heatmap.
+
+```{r}
+# function to calculate one gene-list score across samples
+calc_gene_score <- function(file, expr_mat, do.scaling = TRUE) {
+  gene_list <- read.csv(
+    file.path(folder, file),
+    header = FALSE,
+    stringsAsFactors = FALSE
+  )[[1]]
+  
+  gene_list <- unique(as.character(gene_list))
+  genes_present <- gene_list[gene_list %in% rownames(expr_mat)]
+  
+  if (length(genes_present) == 0) {
+    score <- rep(NA, ncol(expr_mat))
+    names(score) <- colnames(expr_mat)
+    return(score)
+  }
+  
+  mat <- expr_mat[genes_present, , drop = FALSE]
+  
+  # remove genes with zero variance
+  mat <- mat[apply(mat, 1, sd, na.rm = TRUE) > 0, , drop = FALSE]
+  
+  if (nrow(mat) == 0) {
+    score <- rep(NA, ncol(expr_mat))
+    names(score) <- colnames(expr_mat)
+    return(score)
+  }
+  
+  mat_z <- mat
+  if(do.scaling == TRUE){ # row-wise z-score if scaling to apply
+    print('Scaling enabled: scaling now.')
+    mat_z <- t(scale(t(mat)))
+  }
+  
+  # average z-score per sample
+  score <- colMeans(mat_z, na.rm = TRUE)
+  return(score)
+}
+```
+
+Calculate scores.
+
+```{r}
+# calculate scores for all gene lists
+ScoreTable <- do.call(
+  rbind,
+  lapply(gene_list_files, function(f) calc_gene_score(f, CountTable_log2EXP))
+)
+
+rownames(ScoreTable) <- tools::file_path_sans_ext(basename(gene_list_files))
+```
+
+Save the score table.
+
+```{r}
+write.csv(ScoreTable, file.path(folder, "GeneList_ScoreTable.csv"), quote = FALSE)
+```
+
+Plot heatmaps.
+
+```{r}
+#HEAT MAP WITH ALL 20 SAMPLES
+pheatmap(
+  as.matrix(ScoreTable),
+  scale = "row",
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  color = colorRampPalette(c("blue", "white", "red"))(100)
+)
+
+#HEAT MAP WITH 16 SAMPLES WHICH WERE OVA-ACTIVATED
+pheatmap(
+  as.matrix(ScoreTable[, -c(1:4)]),
+  scale = "row",
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  color = colorRampPalette(c("blue", "white", "red"))(100)
+)
+
+#WITHOUT inhibitors
+pheatmap(
+  as.matrix(ScoreTable[, c(1:8)]),
+  scale = "row",
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  color = colorRampPalette(c("blue", "white", "red"))(100)
+)
+
+#ONLY SAMPLES WITHOUT Inhibitors - COLOR SCALING
+mat <- as.matrix(ScoreTable[, c(1:8)])
+
+my_breaks <- c(
+  seq(-2, 0, length.out = 20),
+  seq(0.001, 1.5, length.out = 80)
+)
+
+#HEAT MAP WITH 16 SAMPLES WHICH WERE OVA-ACTIVATED
+pheatmap(
+  as.matrix(ScoreTable[, -c(1:4)]),
+  scale = "row",
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  color = colorRampPalette(c("blue", "white", "red"))(100),
+  breaks = my_breaks
+)
+
+pheatmap(
+  mat,
+  scale = "row",
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  color = colorRampPalette(c("blue", "white", "red"))(100),
+  breaks = my_breaks
+)
+```
+
+# Differential expression analysis and GSEA
+
+We now perform differential expression analyses and generate results.
+
+```{r}
+print(dds_bulk_Lck.data)
+print(dds_bulk_Lck.data@design)
+print(dds_bulk_Lck.data@colData)
+```
+
+Now get results. No LFC shrinkage will be applied.
+
+```{r}
+res.WT.vs.KO.OVA <- results(
+  dds_bulk_Lck.data,
+  contrast = c("genotype.act.inh", "WT OVA 1uM None", "KO OVA 1uM None"),
+)
+
+##
+
+res.WT.vs.WT.IP38 <- results(
+  dds_bulk_Lck.data,
+  contrast = c("genotype.act.inh", "WT OVA 1uM None", "WT OVA 1uM Ip38 12.5 uM"),
+)
+
+res.WT.vs.WT.ERK <- results(
+  dds_bulk_Lck.data,
+  contrast = c("genotype.act.inh", "WT OVA 1uM None", "WT OVA 1uM inhERK10uM"),
+)
+
+res.WT.vs.WT.NFAT <- results(
+  dds_bulk_Lck.data,
+  contrast = c("genotype.act.inh", "WT OVA 1uM None", "WT OVA 1uM Cyclosporin A 0.1uM"),
+)
+
+##
+
+res.KO.vs.KO.IP38 <- results(
+  dds_bulk_Lck.data,
+  contrast = c("genotype.act.inh", "KO OVA 1uM None", "KO OVA 1uM Ip38 12.5 uM"),
+)
+
+res.KO.vs.KO.ERK <- results(
+  dds_bulk_Lck.data,
+  contrast = c("genotype.act.inh", "KO OVA 1uM None", "KO OVA 1uM inhERK10uM"),
+)
+
+res.KO.vs.KO.NFAT <- results(
+  dds_bulk_Lck.data,
+  contrast = c("genotype.act.inh", "KO OVA 1uM None", "KO OVA 1uM Cyclosporin A 0.1uM"),
+)
+
+##
+
+res.WT.IP38.vs.KO.IP38 <- results(
+  dds_bulk_Lck.data,
+  contrast = c("genotype.act.inh", "WT OVA 1uM Ip38 12.5 uM", "KO OVA 1uM Ip38 12.5 uM"),
+)
+
+res.WT.ERK.vs.KO.ERK <- results(
+  dds_bulk_Lck.data,
+  contrast = c("genotype.act.inh", "WT OVA 1uM inhERK10uM", "KO OVA 1uM inhERK10uM"),
+)
+
+res.WT.NFAT.vs.KO.NFAT <- results(
+  dds_bulk_Lck.data,
+  contrast = c("genotype.act.inh", "WT OVA 1uM Cyclosporin A 0.1uM", "KO OVA 1uM Cyclosporin A 0.1uM"),
+)
+
+```
+
+Create fold-change lists (not shrunk) and sort them.
+
+```{r}
+lfc.res.WT.vs.KO.OVA <- res.WT.vs.KO.OVA$log2FoldChange
+names(lfc.res.WT.vs.KO.OVA) <- rownames(res.WT.vs.KO.OVA)
+lfc.res.WT.vs.KO.OVA <- sort(lfc.res.WT.vs.KO.OVA, decreasing = T)
+
+##
+
+lfc.res.WT.vs.WT.IP38 <- res.WT.vs.WT.IP38$log2FoldChange
+names(lfc.res.WT.vs.WT.IP38) <- rownames(res.WT.vs.WT.IP38)
+lfc.res.WT.vs.WT.IP38 <- sort(lfc.res.WT.vs.WT.IP38, decreasing = T)
+
+lfc.res.WT.vs.WT.ERK <- res.WT.vs.WT.ERK$log2FoldChange
+names(lfc.res.WT.vs.WT.ERK) <- rownames(res.WT.vs.WT.ERK)
+lfc.res.WT.vs.WT.ERK <- sort(lfc.res.WT.vs.WT.ERK, decreasing = T)
+
+lfc.res.WT.vs.WT.NFAT <- res.WT.vs.WT.NFAT$log2FoldChange
+names(lfc.res.WT.vs.WT.NFAT) <- rownames(res.WT.vs.WT.NFAT)
+lfc.res.WT.vs.WT.NFAT <- sort(lfc.res.WT.vs.WT.NFAT, decreasing = T)
+
+##
+
+lfc.res.KO.vs.KO.IP38 <- res.KO.vs.KO.IP38$log2FoldChange
+names(lfc.res.KO.vs.KO.IP38) <- rownames(res.KO.vs.KO.IP38)
+lfc.res.KO.vs.KO.IP38 <- sort(lfc.res.KO.vs.KO.IP38, decreasing = T)
+
+lfc.res.KO.vs.KO.ERK <- res.KO.vs.KO.ERK$log2FoldChange
+names(lfc.res.KO.vs.KO.ERK) <- rownames(res.KO.vs.KO.ERK)
+lfc.res.KO.vs.KO.ERK <- sort(lfc.res.KO.vs.KO.ERK, decreasing = T)
+
+lfc.res.KO.vs.KO.NFAT <- res.KO.vs.KO.NFAT$log2FoldChange
+names(lfc.res.KO.vs.KO.NFAT) <- rownames(res.KO.vs.KO.NFAT)
+lfc.res.KO.vs.KO.NFAT <- sort(lfc.res.KO.vs.KO.NFAT, decreasing = T)
+
+##
+
+lfc.res.WT.IP38.vs.KO.IP38 <- res.WT.IP38.vs.KO.IP38$log2FoldChange
+names(lfc.res.WT.IP38.vs.KO.IP38) <- rownames(res.WT.IP38.vs.KO.IP38)
+lfc.res.WT.IP38.vs.KO.IP38 <- sort(lfc.res.WT.IP38.vs.KO.IP38, decreasing = T)
+
+lfc.res.WT.ERK.vs.KO.ERK <- res.WT.ERK.vs.KO.ERK$log2FoldChange
+names(lfc.res.WT.ERK.vs.KO.ERK) <- rownames(res.WT.ERK.vs.KO.ERK)
+lfc.res.WT.ERK.vs.KO.ERK <- sort(lfc.res.WT.ERK.vs.KO.ERK, decreasing = T)
+
+lfc.res.WT.NFAT.vs.KO.NFAT <- res.WT.NFAT.vs.KO.NFAT$log2FoldChange
+names(lfc.res.WT.NFAT.vs.KO.NFAT) <- rownames(res.WT.NFAT.vs.KO.NFAT)
+lfc.res.WT.NFAT.vs.KO.NFAT <- sort(lfc.res.WT.NFAT.vs.KO.NFAT, decreasing = T)
+```
+
+Set up pathway list as a single object.
+
+```{r}
+pathways_list_full <- list()
+top250act.up <- read.csv('Pathways/Filtered/TOP250activatedOVA.csv', header = F)[,1]
+top250act.down <- read.csv('Pathways/Filtered/TOP250inhibitedOVA.csv', header = F)[,1]
+ERK_down <- read.csv('Pathways/Filtered/ERKDOWN_filtered_1.2x.csv', header = F)[,1]
+ERK_up <- read.csv('Pathways/Filtered/ERKUP_filtered_1.2x.csv', header = F)[,1]
+NFAT_down <- read.csv('Pathways/Filtered/NFATDOWN_filtered_1.2x.csv', header = F)[,1]
+NFAT_up <- read.csv('Pathways/Filtered/NFATUP_filtered_1.2x.csv', header = F)[,1]
+P38_down <- read.csv('Pathways/Filtered/P38DOWN_filtered_1.2x.csv', header = F)[,1]
+P38_up <- read.csv('Pathways/Filtered/P38UP_filtered_1.2x.csv', header = F)[,1]
+NFKBall <- read.csv('Pathways/Filtered/NFKBall.csv', header = F)[,1]
+
+pathways_list_full[['top250act.up']] <- top250act.up
+pathways_list_full[['top250act.down']] <- top250act.down
+pathways_list_full[['ERK_down']] <- ERK_down
+pathways_list_full[['ERK_up']] <- ERK_up
+pathways_list_full[['NFAT_down']] <- NFAT_down
+pathways_list_full[['NFAT_up']] <- NFAT_up
+pathways_list_full[['P38_down']] <- P38_down
+pathways_list_full[['P38_up']] <- P38_up
+pathways_list_full[['NFKB_all']] <- NFKBall
+
+pathways_list <- pathways_list_full
+```
+
+Calculate GSEA for each pathway and contrast.
+
+```{r}
+set.seed(42)
+fgsea_Lck_lfc.res.WT.vs.KO.OVA <- fgsea(pathways = pathways_list,
+                                       stats = lfc.res.WT.vs.KO.OVA)
+
+##
+
+fgsea_Lck_lfc.res.WT.vs.WT.IP38 <- fgsea(pathways = pathways_list,
+                                       stats = lfc.res.WT.vs.WT.IP38)
+
+fgsea_Lck_lfc.res.WT.vs.WT.ERK <- fgsea(pathways = pathways_list,
+                                       stats = lfc.res.WT.vs.WT.ERK)
+
+fgsea_Lck_lfc.res.WT.vs.WT.NFAT <- fgsea(pathways = pathways_list,
+                                         stats = lfc.res.WT.vs.WT.NFAT)
+
+##
+
+fgsea_Lck_lfc.res.KO.vs.KO.IP38 <- fgsea(pathways = pathways_list,
+                                       stats = lfc.res.KO.vs.KO.IP38)
+
+fgsea_Lck_lfc.res.KO.vs.KO.ERK <- fgsea(pathways = pathways_list,
+                                        stats = lfc.res.KO.vs.KO.ERK)
+
+fgsea_Lck_lfc.res.KO.vs.KO.NFAT <- fgsea(pathways = pathways_list,
+                                         stats = lfc.res.KO.vs.KO.NFAT)
+
+##
+
+fgsea_Lck_lfc.res.WT.IP38.vs.KO.IP38 <- fgsea(pathways = pathways_list,
+                                              stats = lfc.res.WT.IP38.vs.KO.IP38)
+
+fgsea_Lck_lfc.res.WT.ERK.vs.KO.ERK <- fgsea(pathways = pathways_list,
+                                              stats = lfc.res.WT.ERK.vs.KO.ERK)
+
+fgsea_Lck_lfc.res.WT.NFAT.vs.KO.NFAT <- fgsea(pathways = pathways_list,
+                                              stats = lfc.res.WT.NFAT.vs.KO.NFAT)
+
+```
+
+## GSEA plots
+
+Plot all GSEAs.
+
+## WT vs. KO - act - up
+
+GSEA WT/KO Act. contrast (Activation-induced genes)
+
+```{r, fig.width = 9, fig.show= 'hold', fig.align = 'center'}
+GSE_data <- plotEnrichment(pathways_list_full[['top250act.up']],  lfc.res.WT.vs.KO.OVA)$data
+GSEA.WTKO_act_250_top <- plotGSEA(GSE_data, 'Gene list: TCR-induced genes\nContrast: WT+OVA vs. cKO+OVA', fgsea_Lck_lfc.res.WT.vs.KO.OVA, 9, 11)
+plot(GSEA.WTKO_act_250_top)
+
+GSEA.WTKO_act_250_top.blank <- GSEA.WTKO_act_250_top +
+  theme(text = element_text(color = "white"),
+  legend.text = element_text(color = "white"),
+  legend.title = element_text(color = "white"),
+  strip.text = element_text(color = "white"),
+  axis.text.x = element_text(color = "white"),
+  axis.text.y = element_text(color = "white")
+)
+
+print(GSEA.WTKO_act_250_top.blank)
+```
+
+```{r}
+tiff('Main_figures/Full/Lck_bulk_GSEA_WTKO_Act_Top_250_act.tiff', width = 1700, height = 1000, res = 300)
+print(GSEA.WTKO_act_250_top)
+dev.off()
+
+tiff('Main_figures/Blank/Lck_bulk_GSEA_WTKO_Act_Top_250_act_blank.tiff', width = 1700, height = 1000, res = 300)
+print(GSEA.WTKO_act_250_top.blank)
+dev.off()
+```
+
+GSEA WT/KO Act. contrast (NFAT-induced genes)
+
+```{r, fig.width = 9, fig.show= 'hold', fig.align = 'center'}
+GSE_data <- plotEnrichment(pathways_list[['NFAT_up']],  lfc.res.WT.vs.KO.OVA)$data
+GSEA.WTKO_act_NFAT_up <- plotGSEA(GSE_data,  'Gene list: NFAT-induced genes\nContrast: WT+OVA vs. cKO+OVA', fgsea_Lck_lfc.res.WT.vs.KO.OVA, 4, 11)
+plot(GSEA.WTKO_act_NFAT_up)
+
+GSEA.WTKO_act_NFAT_up.blank <- GSEA.WTKO_act_NFAT_up +
+  theme(text = element_text(color = "white"),
+  legend.text = element_text(color = "white"),
+  legend.title = element_text(color = "white"),
+  strip.text = element_text(color = "white"),
+  axis.text.x = element_text(color = "white"),
+  axis.text.y = element_text(color = "white")
+)
+
+print(GSEA.WTKO_act_NFAT_up.blank)
+```
+
+```{r}
+tiff('Main_figures/Full/Lck_bulk_GSEA_WTKO_Act_NFAT_up.tiff', width = 1700, height = 1000, res = 300)
+print(GSEA.WTKO_act_NFAT_up)
+dev.off()
+
+tiff('Main_figures/Blank/Lck_bulk_GSEA_WTKO_Act_NFAT_up_blank.tiff', width = 1700, height = 1000, res = 300)
+print(GSEA.WTKO_act_NFAT_up.blank)
+dev.off()
+```
+
+GSEA WT/KO Act. contrast (ERK-induced genes)
+
+```{r, fig.width = 9, fig.show= 'hold', fig.align = 'center'}
+GSE_data <- plotEnrichment(pathways_list[['ERK_up']],  lfc.res.WT.vs.KO.OVA)$data
+GSEA.WTKO_act_ERK_up <- plotGSEA(GSE_data,  'Gene list: ERK-induced genes\nContrast: WT+OVA vs. cKO+OVA', fgsea_Lck_lfc.res.WT.vs.KO.OVA, 2, 11)
+plot(GSEA.WTKO_act_ERK_up)
+
+GSEA.WTKO_act_ERK_up.blank <- GSEA.WTKO_act_ERK_up +
+  theme(text = element_text(color = "white"),
+  legend.text = element_text(color = "white"),
+  legend.title = element_text(color = "white"),
+  strip.text = element_text(color = "white"),
+  axis.text.x = element_text(color = "white"),
+  axis.text.y = element_text(color = "white")
+)
+
+print(GSEA.WTKO_act_ERK_up.blank)
+```
+
+```{r}
+tiff('Main_figures/Full/Lck_bulk_GSEA_WTKO_Act_ERK_up.tiff', width = 1700, height = 1000, res = 300)
+print(GSEA.WTKO_act_ERK_up)
+dev.off()
+
+tiff('Main_figures/Blank/Lck_bulk_GSEA_WTKO_Act_ERK_up_blank.tiff', width = 1700, height = 1000, res = 300)
+print(GSEA.WTKO_act_ERK_up.blank)
+dev.off()
+```
+
+GSEA WT/KO Act. contrast (P38-induced genes)
+
+```{r, fig.width = 9, fig.show= 'hold', fig.align = 'center'}
+GSE_data <- plotEnrichment(pathways_list[['P38_up']], lfc.res.WT.vs.KO.OVA)$data
+GSEA.WTKO_act_P38_up <- plotGSEA(GSE_data,  'Gene list: P38-induced genes\nContrast: WT+OVA vs. cKO+OVA', fgsea_Lck_lfc.res.WT.vs.KO.OVA, 7, 11)
+plot(GSEA.WTKO_act_P38_up)
+
+GSEA.WTKO_act_P38_up.blank <- GSEA.WTKO_act_P38_up +
+  theme(text = element_text(color = "white"),
+  legend.text = element_text(color = "white"),
+  legend.title = element_text(color = "white"),
+  strip.text = element_text(color = "white"),
+  axis.text.x = element_text(color = "white"),
+  axis.text.y = element_text(color = "white")
+)
+
+print(GSEA.WTKO_act_P38_up.blank)
+```
+
+```{r}
+tiff('Main_figures/Full/Lck_bulk_GSEA_WTKO_Act_P38_up.tiff', width = 1700, height = 1000, res = 300)
+print(GSEA.WTKO_act_P38_up)
+dev.off()
+
+tiff('Main_figures/Blank/Lck_bulk_GSEA_WTKO_Act_P38_up_blank.tiff', width = 1700, height = 1000, res = 300)
+print(GSEA.WTKO_act_P38_up.blank)
+dev.off()
+```
+
+GSEA WT/KO Act. contrast (NF-kB-induced genes)
+
+```{r, fig.width = 9, fig.show= 'hold', fig.align = 'center'}
+GSE_data <- plotEnrichment(pathways_list[['NFKB_all']], lfc.res.WT.vs.KO.OVA)$data
+GSEA.WTKO_act_NFKB_all <- plotGSEA(GSE_data, 'Gene list: NF-kB-induced genes\nContrast: WT+OVA vs. cKO+OVA', fgsea_Lck_lfc.res.WT.vs.KO.OVA, 5, 11)
+plot(GSEA.WTKO_act_NFKB_all)
+
+GSEA.WTKO_act_NFKB_all.blank <- GSEA.WTKO_act_NFKB_all +
+  theme(text = element_text(color = "white"),
+  legend.text = element_text(color = "white"),
+  legend.title = element_text(color = "white"),
+  strip.text = element_text(color = "white"),
+  axis.text.x = element_text(color = "white"),
+  axis.text.y = element_text(color = "white")
+)
+
+print(GSEA.WTKO_act_NFKB_all.blank)
+```
+
+```{r}
+tiff('Main_figures/Full/Lck_bulk_GSEA_WTKO_Act_NFKB_all.tiff', width = 1700, height = 1000, res = 300)
+print(GSEA.WTKO_act_NFKB_all)
+dev.off()
+
+tiff('Main_figures/Blank/Lck_bulk_GSEA_WTKO_Act_NFKB_all_blank.tiff', width = 1700, height = 1000, res = 300)
+print(GSEA.WTKO_act_NFKB_all.blank)
+dev.off()
+```
+
+## WT vs. KO - act - down
+
+GSEA WT/KO Act. contrast (Activation-repressed genes)
+
+```{r, fig.width = 9, fig.show= 'hold', fig.align = 'center'}
+GSE_data <- plotEnrichment(pathways_list[['top250act.down']],  lfc.res.WT.vs.KO.OVA)$data
+GSEA.WTKO_act_250_top_inh <- plotGSEA(GSE_data, 'Gene list: TCR-repressed genes\nContrast: WT+OVA vs. cKO+OVA', fgsea_Lck_lfc.res.WT.vs.KO.OVA, 8, 11)
+plot(GSEA.WTKO_act_250_top_inh)
+
+GSEA.WTKO_act_250_top_inh.blank <- GSEA.WTKO_act_250_top_inh +
+  theme(text = element_text(color = "white"),
+  legend.text = element_text(color = "white"),
+  legend.title = element_text(color = "white"),
+  strip.text = element_text(color = "white"),
+  axis.text.x = element_text(color = "white"),
+  axis.text.y = element_text(color = "white")
+)
+
+print(GSEA.WTKO_act_250_top_inh.blank)
+```
+
+```{r}
+tiff('Supplemental_figures/Full/Lck_bulk_GSEA_WTKO_Act_Top_250_inh.tiff', width = 1700, height = 1000, res = 300)
+print(GSEA.WTKO_act_250_top_inh)
+dev.off()
+
+tiff('Supplemental_figures/Blank/Lck_bulk_GSEA_WTKO_Act_Top_250_inh_blank.tiff', width = 1700, height = 1000, res = 300)
+print(GSEA.WTKO_act_250_top_inh.blank)
+dev.off()
+```
+
+GSEA WT/KO Act. contrast (NFAT-repressed genes)
+
+```{r, fig.width = 9, fig.show= 'hold', fig.align = 'center'}
+GSE_data <- plotEnrichment(pathways_list[['NFAT_down']], lfc.res.WT.vs.KO.OVA)$data
+GSEA.WTKO_act_NFAT_down <- plotGSEA(GSE_data, 'Gene list: NFAT-repressed genes\nContrast: WT+OVA vs. cKO+OVA', fgsea_Lck_lfc.res.WT.vs.KO.OVA, 3, 11)
+plot(GSEA.WTKO_act_NFAT_down)
+
+GSEA.WTKO_act_NFAT_down.blank <- GSEA.WTKO_act_NFAT_down +
+  theme(text = element_text(color = "white"),
+  legend.text = element_text(color = "white"),
+  legend.title = element_text(color = "white"),
+  strip.text = element_text(color = "white"),
+  axis.text.x = element_text(color = "white"),
+  axis.text.y = element_text(color = "white")
+)
+
+print(GSEA.WTKO_act_NFAT_down.blank)
+```
+
+```{r}
+tiff('Supplemental_figures/Full/Lck_bulk_GSEA_WTKO_Act_NFAT_down.tiff', width = 1700, height = 1000, res = 300)
+print(GSEA.WTKO_act_NFAT_down)
+dev.off()
+
+tiff('Supplemental_figures/Blank/Lck_bulk_GSEA_WTKO_Act_NFAT_down_blank.tiff', width = 1700, height = 1000, res = 300)
+print(GSEA.WTKO_act_NFAT_down.blank)
+dev.off()
+```
+
+GSEA WT/KO Act. contrast (ERK-repressed genes)
+
+```{r, fig.width = 9, fig.show= 'hold', fig.align = 'center'}
+GSE_data <- plotEnrichment(pathways_list[['ERK_down']], lfc.res.WT.vs.KO.OVA)$data
+GSEA.WTKO_act_ERK_down <- plotGSEA(GSE_data, 'Gene list: ERK-repressed genes\nContrast: WT+OVA vs. cKO+OVA', fgsea_Lck_lfc.res.WT.vs.KO.OVA, 1, 11)
+plot(GSEA.WTKO_act_ERK_down)
+
+GSEA.WTKO_act_ERK_down.blank <- GSEA.WTKO_act_ERK_down +
+  theme(text = element_text(color = "white"),
+  legend.text = element_text(color = "white"),
+  legend.title = element_text(color = "white"),
+  strip.text = element_text(color = "white"),
+  axis.text.x = element_text(color = "white"),
+  axis.text.y = element_text(color = "white")
+)
+
+print(GSEA.WTKO_act_ERK_down.blank)
+```
+
+```{r}
+tiff('Supplemental_figures/Full/Lck_bulk_GSEA_WTKO_Act_ERK_down.tiff', width = 1700, height = 1000, res = 300)
+print(GSEA.WTKO_act_ERK_down)
+dev.off()
+
+tiff('Supplemental_figures/Blank/Lck_bulk_GSEA_WTKO_Act_ERK_down_blank.tiff', width = 1700, height = 1000, res = 300)
+print(GSEA.WTKO_act_ERK_down.blank)
+dev.off()
+```
+
+GSEA WT/KO Act. contrast (P38-repressed genes)
+
+```{r, fig.width = 9, fig.show= 'hold', fig.align = 'center'}
+GSE_data <- plotEnrichment(pathways_list[['P38_down']], lfc.res.WT.vs.KO.OVA)$data
+GSEA.WTKO_act_P38_down <- plotGSEA(GSE_data, 'Gene list: P38-repressed genes\nContrast: WT+OVA vs. cKO+OVA', fgsea_Lck_lfc.res.WT.vs.KO.OVA, 6, 11)
+plot(GSEA.WTKO_act_P38_down)
+
+GSEA.WTKO_act_P38_down.blank <- GSEA.WTKO_act_P38_down +
+  theme(text = element_text(color = "white"),
+  legend.text = element_text(color = "white"),
+  legend.title = element_text(color = "white"),
+  strip.text = element_text(color = "white"),
+  axis.text.x = element_text(color = "white"),
+  axis.text.y = element_text(color = "white")
+)
+
+print(GSEA.WTKO_act_P38_down.blank)
+```
+
+```{r}
+tiff('Supplemental_figures/Full/Lck_bulk_GSEA_WTKO_Act_P38_down.tiff', width = 1700, height = 1000, res = 300)
+print(GSEA.WTKO_act_P38_down)
+dev.off()
+
+tiff('Supplemental_figures/Blank/Lck_bulk_GSEA_WTKO_Act_P38_down_blank.tiff', width = 1700, height = 1000, res = 300)
+print(GSEA.WTKO_act_P38_down.blank)
+dev.off()
+```
+
+## WT inhibitors comparisons.
+
+```{r, fig.width = 9, fig.show= 'hold', fig.align = 'center'}
+GSE_data <- plotEnrichment(pathways_list[['NFAT_up']],  lfc.res.WT.vs.WT.NFAT)$data
+GSEA.WT_act_vs_act_Cycl_NFAT_up <- plotGSEA(GSE_data, 'Gene list: NFAT-induced genes\nContrast: WT+OVA vs. WT+OVA+NFATi', fgsea_Lck_lfc.res.WT.vs.WT.NFAT, 4, 11)
+plot(GSEA.WT_act_vs_act_Cycl_NFAT_up)
+
+GSEA.WT_act_vs_act_Cycl_NFAT_up.blank <- GSEA.WT_act_vs_act_Cycl_NFAT_up +
+  theme(text = element_text(color = "white"),
+  legend.text = element_text(color = "white"),
+  legend.title = element_text(color = "white"),
+  strip.text = element_text(color = "white"),
+  axis.text.x = element_text(color = "white"),
+  axis.text.y = element_text(color = "white")
+)
+
+print(GSEA.WT_act_vs_act_Cycl_NFAT_up.blank)
+```
+
+```{r}
+tiff('Supplemental_figures/Full/Lck_bulk_GSEA_WT_Act_vs_act_NFAT_Cycl_up.tiff', width = 1700, height = 1000, res = 300)
+print(GSEA.WT_act_vs_act_Cycl_NFAT_up)
+dev.off()
+
+tiff('Supplemental_figures/Blank/Lck_bulk_GSEA_WT_Act_vs_act_NFAT_Cycl_up_blank.tiff', width = 1700, height = 1000, res = 300)
+print(GSEA.WT_act_vs_act_Cycl_NFAT_up.blank)
+dev.off()
+```
+
+```{r, fig.width = 9, fig.show= 'hold', fig.align = 'center'}
+GSE_data <- plotEnrichment(pathways_list[['ERK_up']],  lfc.res.WT.vs.WT.ERK)$data
+GSEA.WT_act_vs_act_ERK_ERK_up <- plotGSEA(GSE_data, 'Gene list: ERK-induced genes\nContrast: WT+OVA vs. WT+OVA+ERKi', fgsea_Lck_lfc.res.WT.vs.WT.ERK, 2, 11)
+plot(GSEA.WT_act_vs_act_ERK_ERK_up)
+
+GSEA.WT_act_vs_act_ERK_ERK_up.blank <- GSEA.WT_act_vs_act_ERK_ERK_up +
+  theme(text = element_text(color = "white"),
+  legend.text = element_text(color = "white"),
+  legend.title = element_text(color = "white"),
+  strip.text = element_text(color = "white"),
+  axis.text.x = element_text(color = "white"),
+  axis.text.y = element_text(color = "white")
+)
+
+print(GSEA.WT_act_vs_act_ERK_ERK_up.blank)
+```
+
+```{r}
+tiff('Supplemental_figures/Full/Lck_bulk_GSEA_WT_Act_vs_Act_ERK_ERK_up.tiff', width = 1700, height = 1000, res = 300)
+print(GSEA.WT_act_vs_act_ERK_ERK_up)
+dev.off()
+
+tiff('Supplemental_figures/Blank/Lck_bulk_GSEA_WT_Act_vs_Act_ERK_ERK_up_blank.tiff', width = 1700, height = 1000, res = 300)
+print(GSEA.WT_act_vs_act_ERK_ERK_up.blank)
+dev.off()
+```
+
+```{r, fig.width = 9, fig.show= 'hold', fig.align = 'center'}
+GSE_data <- plotEnrichment(pathways_list[['P38_up']],  lfc.res.WT.vs.WT.IP38)$data
+GSEA.WT_act_vs_act_Ip38_P38_up <- plotGSEA(GSE_data, 'Gene list: P38-induced genes\nContrast: WT+OVA vs. WT+OVA+P38i', fgsea_Lck_lfc.res.WT.vs.WT.IP38, 7, 11)
+plot(GSEA.WT_act_vs_act_Ip38_P38_up)
+
+GSEA.WT_act_vs_act_Ip38_P38_up.blank <- GSEA.WT_act_vs_act_Ip38_P38_up +
+  theme(text = element_text(color = "white"),
+  legend.text = element_text(color = "white"),
+  legend.title = element_text(color = "white"),
+  strip.text = element_text(color = "white"),
+  axis.text.x = element_text(color = "white"),
+  axis.text.y = element_text(color = "white")
+)
+
+print(GSEA.WT_act_vs_act_Ip38_P38_up.blank)
+```
+
+```{r}
+tiff('Supplemental_figures/Full/Lck_bulk_GSEA_WT_Act_vs_Act_Ip38_P38_up.tiff', width = 1700, height = 1000, res = 300)
+print(GSEA.WT_act_vs_act_Ip38_P38_up)
+dev.off()
+
+tiff('Supplemental_figures/Blank/Lck_bulk_GSEA_WT_Act_vs_Act_Ip38_P38_up_blank.tiff', width = 1700, height = 1000, res = 300)
+print(GSEA.WT_act_vs_act_Ip38_P38_up.blank)
+dev.off()
+```
+
+## KO inhibitors comparisons.
+
+```{r, fig.width = 9, fig.show= 'hold', fig.align = 'center'}
+GSE_data <- plotEnrichment(pathways_list[['NFAT_up']],  lfc.res.KO.vs.KO.NFAT)$data
+GSEA.KO_act_vs_act_Cycl_NFAT_up <- plotGSEA(GSE_data, 'Gene list: NFAT-induced genes\nContrast: cKO+OVA vs. cKO+OVA+NFATi', fgsea_Lck_lfc.res.KO.vs.KO.NFAT, 4, 11)
+plot(GSEA.KO_act_vs_act_Cycl_NFAT_up)
+
+GSEA.KO_act_vs_act_Cycl_NFAT_up.blank <- GSEA.KO_act_vs_act_Cycl_NFAT_up +
+  theme(text = element_text(color = "white"),
+  legend.text = element_text(color = "white"),
+  legend.title = element_text(color = "white"),
+  strip.text = element_text(color = "white"),
+  axis.text.x = element_text(color = "white"),
+  axis.text.y = element_text(color = "white")
+)
+
+print(GSEA.KO_act_vs_act_Cycl_NFAT_up.blank)
+```
+
+```{r}
+tiff('Supplemental_figures/Full/Lck_bulk_GSEA_KO_Act_vs_act_NFAT_Cycl_up.tiff', width = 1700, height = 1000, res = 300)
+print(GSEA.KO_act_vs_act_Cycl_NFAT_up)
+dev.off()
+
+tiff('Supplemental_figures/Blank/Lck_bulk_GSEA_KO_Act_vs_act_NFAT_Cycl_up_blank.tiff', width = 1700, height = 1000, res = 300)
+print(GSEA.KO_act_vs_act_Cycl_NFAT_up.blank)
+dev.off()
+```
+
+```{r, fig.width = 9, fig.show= 'hold', fig.align = 'center'}
+GSE_data <- plotEnrichment(pathways_list[['ERK_up']],  lfc.res.KO.vs.KO.ERK)$data
+GSEA.KO_act_vs_act_ERK_ERK_up <- plotGSEA(GSE_data, 'Gene list: ERK-induced genes\nContrast: cKO+OVA vs. cKO+OVA+ERKi', fgsea_Lck_lfc.res.KO.vs.KO.ERK, 2, 11)
+plot(GSEA.KO_act_vs_act_ERK_ERK_up)
+
+GSEA.KO_act_vs_act_ERK_ERK_up.blank <- GSEA.KO_act_vs_act_ERK_ERK_up +
+  theme(text = element_text(color = "white"),
+  legend.text = element_text(color = "white"),
+  legend.title = element_text(color = "white"),
+  strip.text = element_text(color = "white"),
+  axis.text.x = element_text(color = "white"),
+  axis.text.y = element_text(color = "white")
+)
+
+print(GSEA.KO_act_vs_act_ERK_ERK_up.blank)
+```
+
+```{r}
+tiff('Supplemental_figures/Full/Lck_bulk_GSEA_KO_Act_vs_Act_ERK_ERK_up.tiff', width = 1700, height = 1000, res = 300)
+print(GSEA.KO_act_vs_act_ERK_ERK_up)
+dev.off()
+
+tiff('Supplemental_figures/Blank/Lck_bulk_GSEA_KO_Act_vs_Act_ERK_ERK_up_blank.tiff', width = 1700, height = 1000, res = 300)
+print(GSEA.KO_act_vs_act_ERK_ERK_up.blank)
+dev.off()
+```
+
+```{r, fig.width = 9, fig.show= 'hold', fig.align = 'center'}
+GSE_data <- plotEnrichment(pathways_list[['P38_up']],  lfc.res.KO.vs.KO.IP38)$data
+GSEA.KO_act_vs_act_Ip38_P38_up <- plotGSEA(GSE_data, 'Gene list: P38-induced genes\nContrast: cKO+OVA vs. cKO+OVA+P38i', fgsea_Lck_lfc.res.KO.vs.KO.IP38, 7, 11)
+plot(GSEA.KO_act_vs_act_Ip38_P38_up)
+
+GSEA.KO_act_vs_act_Ip38_P38_up.blank <- GSEA.KO_act_vs_act_Ip38_P38_up +
+  theme(text = element_text(color = "white"),
+  legend.text = element_text(color = "white"),
+  legend.title = element_text(color = "white"),
+  strip.text = element_text(color = "white"),
+  axis.text.x = element_text(color = "white"),
+  axis.text.y = element_text(color = "white")
+)
+
+print(GSEA.KO_act_vs_act_Ip38_P38_up.blank)
+```
+
+```{r}
+tiff('Supplemental_figures/Full/Lck_bulk_GSEA_KO_Act_vs_Act_Ip38_P38_up.tiff', width = 1700, height = 1000, res = 300)
+print(GSEA.KO_act_vs_act_Ip38_P38_up)
+dev.off()
+
+tiff('Supplemental_figures/Blank/Lck_bulk_GSEA_KO_Act_vs_Act_Ip38_P38_up_blank.tiff', width = 1700, height = 1000, res = 300)
+print(GSEA.KO_act_vs_act_Ip38_P38_up.blank)
+dev.off()
+```
+
+## WT/KO inhibitor comparisons
+
+GSEA WT/KO Cyclosp. A contrast (Activation-induced genes)
+
+```{r, fig.width = 9, fig.show= 'hold', fig.align = 'center'}
+GSE_data <- plotEnrichment(pathways_list[['top250act.up']],  lfc.res.WT.NFAT.vs.KO.NFAT)$data
+GSEA.WTKO_act_cyclosp_250_top <- plotGSEA(GSE_data, 'Gene list: TCR-induced genes\nContrast: WT+OVA+NFATi vs. cKO+OVA+NFATi', fgsea_Lck_lfc.res.WT.NFAT.vs.KO.NFAT, 9, 11)
+plot(GSEA.WTKO_act_cyclosp_250_top)
+
+GSEA.WTKO_act_cyclosp_250_top.blank <- GSEA.WTKO_act_cyclosp_250_top  +
+  theme(text = element_text(color = "white"),
+  legend.text = element_text(color = "white"),
+  legend.title = element_text(color = "white"),
+  strip.text = element_text(color = "white"),
+  axis.text.x = element_text(color = "white"),
+  axis.text.y = element_text(color = "white")
+)
+
+print(GSEA.WTKO_act_cyclosp_250_top.blank)
+```
+
+```{r}
+tiff('Main_figures/Full/Lck_bulk_GSEA_WTKO_Act_Cyclosp_A_Top_250_act.tiff', width = 1700, height = 1000, res = 300)
+print(GSEA.WTKO_act_cyclosp_250_top)
+dev.off()
+
+tiff('Main_figures/Blank/Lck_bulk_GSEA_WTKO_Act_Cyclosp_A_Top_250_act_blank.tiff', width = 1700, height = 1000, res = 300)
+print(GSEA.WTKO_act_cyclosp_250_top.blank)
+dev.off()
+```
+
+GSEA WT/KO Act. + ERK contrast (Activation-induced genes)
+
+```{r, fig.width = 9, fig.show= 'hold', fig.align = 'center'}
+GSE_data <- plotEnrichment(pathways_list[['top250act.up']],  lfc.res.WT.ERK.vs.KO.ERK)$data
+GSEA.WTKO_act_ERK_250_top <- plotGSEA(GSE_data, 'Gene list: TCR-induced genes\nContrast: WT+OVA+ERKi vs. cKO+OVA+ERKi', fgsea_Lck_lfc.res.WT.ERK.vs.KO.ERK, 9, 11)
+plot(GSEA.WTKO_act_ERK_250_top)
+
+GSEA.WTKO_act_ERK_250_top.blank <- GSEA.WTKO_act_ERK_250_top  +
+  theme(text = element_text(color = "white"),
+  legend.text = element_text(color = "white"),
+  legend.title = element_text(color = "white"),
+  strip.text = element_text(color = "white"),
+  axis.text.x = element_text(color = "white"),
+  axis.text.y = element_text(color = "white")
+)
+
+print(GSEA.WTKO_act_ERK_250_top.blank)
+```
+
+```{r}
+tiff('Main_figures/Full/Lck_bulk_GSEA_WTKO_Act_ERK_A_Top_250_act.tiff', width = 1700, height = 1000, res = 300)
+print(GSEA.WTKO_act_ERK_250_top)
+dev.off()
+
+tiff('Main_figures/Blank/Lck_bulk_GSEA_WTKO_Act_ERK_A_Top_250_act_blank.tiff', width = 1700, height = 1000, res = 300)
+print(GSEA.WTKO_act_ERK_250_top.blank)
+dev.off()
+```
+
+GSEA WT/KO Act. + P38 contrast (Activation-induced genes)
+
+```{r, fig.width = 9, fig.show= 'hold', fig.align = 'center'}
+GSE_data <- plotEnrichment(pathways_list[['top250act.up']],  lfc.res.WT.IP38.vs.KO.IP38)$data
+GSEA.WTKO_act_P38_250_top <- plotGSEA(GSE_data, 'Gene list: TCR-induced genes\nContrast: WT+OVA+P38i vs. cKO+OVA+P38i', fgsea_Lck_lfc.res.WT.IP38.vs.KO.IP38, 9, 11)
+plot(GSEA.WTKO_act_P38_250_top)
+
+GSEA.WTKO_act_P38_250_top.blank <- GSEA.WTKO_act_P38_250_top  +
+  theme(text = element_text(color = "white"),
+  legend.text = element_text(color = "white"),
+  legend.title = element_text(color = "white"),
+  strip.text = element_text(color = "white"),
+  axis.text.x = element_text(color = "white"),
+  axis.text.y = element_text(color = "white")
+)
+
+print(GSEA.WTKO_act_P38_250_top.blank)
+```
+
+```{r}
+tiff('Main_figures/Full/Lck_bulk_GSEA_WTKO_Act_P38_A_Top_250_act.tiff', width = 1700, height = 1000, res = 300)
+print(GSEA.WTKO_act_P38_250_top)
+dev.off()
+
+tiff('Main_figures/Blank/Lck_bulk_GSEA_WTKO_Act_P38_A_Top_250_act_blank.tiff', width = 1700, height = 1000, res = 300)
+print(GSEA.WTKO_act_P38_250_top.blank)
+dev.off()
+```
+
+# Heatmap of L2FC for each sample
+
+We calculate L2FC for each meaningful contrast between WT and KO samples for each sample separately. First, show colData of DDS object.
+
+```{r}
+print(dds_bulk_Lck.data@colData %>% as.data.frame)
+```
+
+Now compute fold changes for each contrast and sample. This will be computed from normalized data.
+
+```{r}
+l2fc.WT.vs.KO.sample.2 <- log2((Lck_normalized[,dds_bulk_Lck.data$sample.name == "Sample6Bulk1"] + 1)/(Lck_normalized[,dds_bulk_Lck.data$sample.name == "Sample11Bulk1"] + 1))
+l2fc.WT.vs.KO.sample.3 <- log2((Lck_normalized[,dds_bulk_Lck.data$sample.name == "Sample1Bulk2"] + 1)/(Lck_normalized[,dds_bulk_Lck.data$sample.name == "Sample6Bulk2"] + 1))
+
+l2fc.WT.vs.KO.OVA.sample.2 <- log2((Lck_normalized[,dds_bulk_Lck.data$sample.name == "Sample7Bulk1"] + 1)/(Lck_normalized[,dds_bulk_Lck.data$sample.name == "Sample12Bulk1"] + 1))
+l2fc.WT.vs.KO.OVA.sample.3 <- log2((Lck_normalized[,dds_bulk_Lck.data$sample.name == "Sample2Bulk2"] + 1)/(Lck_normalized[,dds_bulk_Lck.data$sample.name == "Sample7Bulk2"] + 1))
+
+l2fc.WT.vs.KO.p38i.sample.2 <- log2((Lck_normalized[,dds_bulk_Lck.data$sample.name == "Sample8Bulk1"] + 1)/(Lck_normalized[,dds_bulk_Lck.data$sample.name == "Sample13Bulk1"] + 1))
+l2fc.WT.vs.KO.p38i.sample.3 <- log2((Lck_normalized[,dds_bulk_Lck.data$sample.name == "Sample3Bulk2"] + 1)/(Lck_normalized[,dds_bulk_Lck.data$sample.name == "Sample8Bulk2"] + 1))
+
+l2fc.WT.vs.KO.ERKi.sample.2 <- log2((Lck_normalized[,dds_bulk_Lck.data$sample.name == "Sample9Bulk1"] + 1)/(Lck_normalized[,dds_bulk_Lck.data$sample.name == "Sample14Bulk1"] + 1))
+l2fc.WT.vs.KO.ERKi.sample.3 <- log2((Lck_normalized[,dds_bulk_Lck.data$sample.name == "Sample4Bulk2"] + 1)/(Lck_normalized[,dds_bulk_Lck.data$sample.name == "Sample9Bulk2"] + 1))
+
+l2fc.WT.vs.KO.NFATi.sample.2 <- log2((Lck_normalized[,dds_bulk_Lck.data$sample.name == "Sample10Bulk1"] + 1)/(Lck_normalized[,dds_bulk_Lck.data$sample.name == "Sample15Bulk1"] + 1))
+l2fc.WT.vs.KO.NFATi.sample.3 <- log2((Lck_normalized[,dds_bulk_Lck.data$sample.name == "Sample5Bulk2"] + 1)/(Lck_normalized[,dds_bulk_Lck.data$sample.name == "Sample10Bulk2"] + 1))
+```
+
+Build matrix from the data and name it.
+
+```{r}
+lf2c.matrix.sample <- cbind(l2fc.WT.vs.KO.sample.2, l2fc.WT.vs.KO.sample.3,
+                            l2fc.WT.vs.KO.OVA.sample.2, l2fc.WT.vs.KO.OVA.sample.3,
+                            l2fc.WT.vs.KO.p38i.sample.2, l2fc.WT.vs.KO.p38i.sample.3,
+                            l2fc.WT.vs.KO.ERKi.sample.2, l2fc.WT.vs.KO.ERKi.sample.3,
+                            l2fc.WT.vs.KO.NFATi.sample.2, l2fc.WT.vs.KO.NFATi.sample.3) %>% as.matrix
+
+rownames(lf2c.matrix.sample) <- names(l2fc.WT.vs.KO.sample.2)
+colnames(lf2c.matrix.sample) <- c('L2FC-WT/KO-NA.bulk1', 'L2FC-WT/KO-NA.bulk2',
+                                  'L2FC-WT/KO-OVA.bulk1', 'L2FC-WT/KO-OVA.bulk2',
+                                  'L2FC-WT/KO-p38i.bulk1', 'L2FC-WT/KO-p38i.bulk2',
+                                  'L2FC-WT/KO-ERKi.bulk1', 'L2FC-WT/KO-ERKi.bulk2',
+                                  'L2FC-WT/KO-NFATi.bulk1', 'L2FC-WT/KO-NFATi.bulk2')
+```
+
+Make some validations.
+
+```{r}
+test_bulk1 <- log2((Lck_normalized[,1:5] + 1)/(Lck_normalized[,6:10] + 1))
+test_bulk2 <- log2((Lck_normalized[,11:15] + 1)/(Lck_normalized[,16:20] + 1))
+
+print(test_bulk1 %>% head)
+print(test_bulk2 %>% head)
+
+do.call(
+  rbind,
+  lapply(gene_list_files, function(f) calc_gene_score(f, test_bulk1, do.scaling = FALSE))
+)
+
+
+do.call(
+  rbind,
+  lapply(gene_list_files, function(f) calc_gene_score(f, test_bulk2, do.scaling = FALSE))
+)
+
+```
+
+Results are identical with above matrix, so that's nice.
+
+Paths of files was defined before using parameter 'folder' and 'gene_list_files'. We use scoring function without scaling to obtain L2FC.
+
+```{r}
+# calculate scores for all gene lists
+L2FCScoreTable <- do.call(
+  rbind,
+  lapply(gene_list_files, function(f) calc_gene_score(f, lf2c.matrix.sample, do.scaling = FALSE))
+)
+
+rownames(L2FCScoreTable) <- tools::file_path_sans_ext(basename(gene_list_files))
+```
+
+Save the score table.
+
+```{r}
+write.csv(L2FCScoreTable, file.path(folder, "L2FC_ScoreTable.csv"), quote = FALSE)
+```
+
+Plot heatmaps.
+
+```{r}
+#HEAT MAP WITH ALL 10 SAMPLES
+pheatmap(
+  as.matrix(L2FCScoreTable),
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  color = colorRampPalette(c("blue", "white", "red"))(100)
+)
+
+#HEAT MAP WITH 8 SAMPLES WHICH WERE OVA-ACTIVATED
+pheatmap(
+  as.matrix(L2FCScoreTable[, -c(1:2)]),
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  color = colorRampPalette(c("blue", "white", "red"))(100)
+)
+
+#WITHOUT inhibitors
+pheatmap(
+  as.matrix(L2FCScoreTable[, c(1:4)]),
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  color = colorRampPalette(c("blue", "white", "red"))(100)
+)
+
+#ONLY SAMPLES WITHOUT Inhibitors - COLOR SCALING
+mat <- as.matrix(L2FCScoreTable[, c(1:4)])
+
+my_breaks <- c(
+  seq(-2, 0, length.out = 20),
+  seq(0.001, 1.5, length.out = 80)
+)
+
+#HEAT MAP WITH 8 SAMPLES WHICH WERE OVA-ACTIVATED
+pheatmap(
+  as.matrix(L2FCScoreTable[, -c(1:4)]),
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  color = colorRampPalette(c("blue", "white", "red"))(100),
+  breaks = my_breaks
+)
+
+pheatmap(
+  mat,
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  color = colorRampPalette(c("blue", "white", "red"))(100),
+  breaks = my_breaks
+)
+```
+
+```{r}
+lim <- max(abs(range(L2FCScoreTable[, c(1:4)], na.rm = TRUE)))
+
+cols <- colorRampPalette(c("blue", "white", "red"))(101)
+breaks <- seq(-lim, lim, length.out = 102)
+
+pheatmap(L2FCScoreTable[, c(1:4)],
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,         
+         color = cols,
+         breaks = breaks)
+
+#lim <- max(abs(range(L2FCScoreTable[, -c(1:2)], na.rm = TRUE)))
+
+#cols <- colorRampPalette(c("blue", "white", "red"))(101)
+#breaks <- seq(-lim, lim, length.out = 102)
+
+pheatmap(L2FCScoreTable[, -c(1:2)],
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,         
+         color = cols,
+         breaks = breaks)
+```
+
+```{r}
+lim <- max(abs(range(L2FCScoreTable[c(1,4,9), -c(1:2)], na.rm = TRUE)))
+
+cols <- colorRampPalette(c("blue", "white", "red"))(101)
+breaks <- seq(-lim, lim, length.out = 102)
+
+pheatmap(L2FCScoreTable[c(1,4,9), -c(1:2)],
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,         
+         color = cols,
+         breaks = breaks)
+```
+
+```{r}
+plot.mat.act <- cbind(L2FCScoreTable[c(1), -c(1:2,4,6,8,10)], L2FCScoreTable[c(1), -c(1:2,3,5,7,9)]) 
+rownames(plot.mat.act) <- c('L2FC-WT/KO-OVA', 'L2FC-WT/KO-p38i', 'L2FC-WT/KO-ERKi', 'L2FC-WT/KO-NFATi')
+colnames(plot.mat.act) <- c('Replicate1', 'Replicate2')
+
+lim <- max(abs(range(plot.mat.act, na.rm = TRUE)))
+
+cols <- colorRampPalette(c("blue", "white", "red"))(101)
+breaks <- seq(-lim, lim, length.out = 102)
+
+pheatmap(plot.mat.act,
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,         
+         color = cols,
+         breaks = breaks)
+```
