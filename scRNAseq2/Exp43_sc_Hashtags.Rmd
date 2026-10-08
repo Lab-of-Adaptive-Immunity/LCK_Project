@@ -93,7 +93,7 @@ This module also requires the precision of following parameters. The description
   + **cutoff.values:** - limits for markers by which cells will be split in groups. Ignored if *split.auto* is set to TRUE, otherwise it is required.
  
 ```{r parameters}
-raw.matrix.path <- 'filtered_feature_bc_matrix.h5'
+raw.matrix.path <- 'Lck2/filtered_feature_bc_matrix.h5'
 target.path <- 'Hashtags/'
 min.GE <- 200
 sample.strains <- c('Mouse_Hashtag_1', 'Mouse_Hashtag_2', 'Mouse_Hashtag_3', 'Mouse_Hashtag_5', 'Mouse_Hashtag_6', 'Mouse_Hashtag_9')

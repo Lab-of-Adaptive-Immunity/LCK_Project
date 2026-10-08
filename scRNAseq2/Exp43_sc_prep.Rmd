@@ -49,7 +49,7 @@ mm.g2m.genes <- scGate::genes.blacklist.default$Mm$cellCycle.G2M
 Load matrix and VDJ data. Use TRUST4 to generate results.
 
 ```{r}
-gex <- Read10X_h5('raw_feature_bc_matrix.h5')
+gex <- Read10X_h5('Lck2/raw_feature_bc_matrix.h5')
 vdj.tab <- build.trust.VDJ.table('TRUST_data.tsv')
 
 # ID of experiment
@@ -472,7 +472,7 @@ Filter out strange cells:
 - Those that have CD45.1
 - Those with 0 Lck raw counts
 
-First mark cells by whit OT-I they possess
+First mark cells by what OT-I they possess
 
 ```{r}
 exp43_Lck_finalized <- exp43_Lck_filt 

@@ -35,7 +35,7 @@ The directory **bulkRNAseq** contains:
 The directory **scRNAseq1** contains:
 
 * **Exp21_W1_preparation.Rmd:** Used for demultiplexing of samples in data and generation of initial data. It creates Datasets directory and saves file "exp21W1_init_all.rds" into it
-* **LCK_Library.csv:** A file needed to run mapping by 10X Cell ranger. **The /path/to/GitHub/directory needs to be replaced by *absolute* path to where this repository was cloned (ending with LCK_Project).
+* **LCK_Library.csv:** A file needed to run mapping by 10X Cell ranger. **The /path/to/GitHub/directory needs to be replaced by *absolute* path to where this repository was cloned (ending with LCK_Project).**
 * **Feature_Reference.csv:** A Feature reference file to be used with cellranger. You can also obtain it at GEO NCBI repository, Accession number GSE304760 
 
 The directory **scRNAseq2** contains:
@@ -43,8 +43,9 @@ The directory **scRNAseq2** contains:
 * **Exp43_sc_Hashtags.Rmd:** Used for demultiplexing of samples by hashtags.
 * **Exp43_sc_prep.Rmd:** Initial processing of data.
 * **Exp43_sc_import_spec_Lck_data.Rmd:** Used for addition of Lck-KO related information.
-* **LCK_Library.csv:** A file needed to run mapping by 10X Cell ranger. **The /path/to/GitHub/directory needs to be replaced by *absolute* path to where this repository was cloned (ending with LCK_Project).
+* **LCK_Library2.csv:** A file needed to run mapping by 10X Cell ranger. **The /path/to/GitHub/directory needs to be replaced by *absolute* path to where this repository was cloned (ending with LCK_Project)**.
 * **Feature_Reference.csv:** A Feature reference file to be used with cellranger. You can also obtain it at GEO NCBI repository, Accession number GSE342586
+* **GRCm39.Lck.WT.KO.gtf:** A GTF file (Ensembl 109, GRCm39) of Lck and Lck KO sequences encoded as isoforms.
 
 ## Analysis preparation
 
@@ -53,7 +54,7 @@ Before running analysis, you need to make sure you have:
 * All required packages for R (see scripts);
 * GRCm38 reference/transcriptome, which was made according to the instructions for Cell ranger v5.0.1 from Ensembl primary assembly MM file, version 102);
 
-Afterwards, you need to clone this project. You'll end up with Project_Adrenalitis directory with sub-directories and contents describet above
+Afterwards, you need to clone this project. You'll end up with Project_Adrenalitis directory with sub-directories and contents described above
 
 ```
 git clone https://github.com/Lab-of-Adaptive-Immunity/LCK_Project.git
@@ -75,7 +76,7 @@ mkdir Fastqs1
 mkdir Fastqs2
 ```
 
-2. Download Fastq files (link given above, follow instructions on NCBI site). **These files must be stored in Fastqs1 (for batch1) and Fastq2 (for batch2) directory! It is also necessary to rename files to match input naming scheme in files batch1_merge_fastqs.sh and batch2_Lck_bulk.sh!** batch1 and batch2 are defined as run1 and run2 on GEO NCBI repository.
+2. Download Fastq files (link given above, follow instructions on NCBI site, Accession number GSE342585). **These files must be stored in Fastqs1 (for batch1) and Fastq2 (for batch2) directory! It is also necessary to rename files to match input naming scheme in files batch1_merge_fastqs.sh and batch2_Lck_bulk.sh!** batch1 and batch2 are defined as run1 and run2 on GEO NCBI repository.
 
 3. On batch1, run `batch1_merge_fastqs.sh` script. This script will merge files so there is only one file for each read and sample.
 Note: You need to run this while in bulkRNAseq
@@ -101,26 +102,60 @@ mkdir Fastqs
 cd Fastqs
 ```
 
-2. Download Fastq files (link given above, follow instructions on NCBI site). **These files must be stored in Fastqs directory!** Once done, return into root of the project. 
+2. Download Fastq files (link given above, follow instructions on NCBI sit, Accesion number GSE304760). **These files must be stored in Fastqs directory!** Once done, return into root of the project. 
 
 ```
 cd .. # Return to root of project
 ```
 
-3. Perform mapping. Before starting with mapping itself, you need to have your GRCm38 v102 reference ready (see above) and you need to modify Adrenals_Library.csv by replacing **/path/to/GitHub/directory/** with **your current path** (ie. if you cloned directory to path /home/johndoe/, then the /path/to/GitHub/directory/ would be replaced by /home/johndoe/Project_Adrenalitis/). Once done, you run the nalaysis with command: 
+3. Perform mapping. Before starting with mapping itself, you need to have your GRCm38 v102 reference ready (see above) and you need to modify `Adrenals_Library.csv` by replacing **/path/to/GitHub/directory/** with **your current path** (ie. if you cloned directory to path `/home/johndoe/`, then the `/path/to/GitHub/directory/` would be replaced by `/home/johndoe/Project_Adrenalitis/`). Once done, you run the analysis with command: 
 
 ```
-cellranger count --id=Exp_21_W1 --transcriptome=/path/to/transcriptome/GRCm38_v102 --libraries=Library_E06_W3.csv --feature-ref=FeatureReference.csv --localcores=8
+cellranger count --id=Lck1 --transcriptome=/path/to/transcriptome/GRCm39_v109 --libraries=LCK_Library.csv --feature-ref=FeatureReference.csv --localcores=8
 ```
 
 where /path/to/transcriptome/GRCm38_v102 is path to your reference/transcriptome (see above) and FeatureReference.csv is provided here (see above; it is also available in GEON NCBI but it lacks one sample that is not used at the end). --localcores specifies the number of cores and number should be lower or equal to the number of cores your PC has.
 
-6. Run, preferably in RStudio:
+4. Run, preferably in RStudio:
 
-* Exp21_W1_preparation.Rmd
+* `Exp21_W1_preparation.Rmd`
+
+You need to specify the 
 
 ## Analysis of Adrenalitis single cell data - second batch
 
+1. Create Fastq directory and go into it.
 
+```
+mkdir Fastqs
+cd Fastqs
+```
+
+2. Download Fastq files (link given above, follow instructions on NCBI site, Accession number GSE342586). **These files must be stored in Fastqs directory!** Once done, return into root of the project. 
+
+```
+cd .. # Return to root of project
+```
+
+3. Perform mapping. Before starting with mapping itself, you need to have your GRCm39 v102 reference ready (see above) and you need to modify `Adrenals_Library.csv` by replacing **/path/to/GitHub/directory/** with **your current path** (ie. if you cloned directory to path `/home/johndoe/`, then the `/path/to/GitHub/directory/` would be replaced by `/home/johndoe/Project_Adrenalitis/`). Once done, you run the nalaysis with command: 
+
+```
+cellranger count --id=Lck2 --transcriptome=/path/to/transcriptome/GRCm38_v102 --libraries=LCK_Library2.csv --feature-ref=FeatureReference.csv --localcores=8
+```
+where /path/to/transcriptome/GRCm38_v102 is path to your reference/transcriptome (see above) and FeatureReference.csv is provided here (see above; it is also available in GEON NCBI but it lacks one sample that is not used at the end). --localcores specifies the number of cores and number should be lower or equal to the number of cores your PC has.
+
+4. Perform mapping on custom reference made using `GRCm39.Lck.WT.KO.gtf`. The command is similar as above, but the reference made using this GTF file will account only for Lck reads and distinguish between those that come from WT Lck and those that may come from KO.
+
+5. Use TRUST4 to create VDJ. This is done on BAM file created in previous step. The fasta file `GRCm38_bcrtcr.fa` is necessary to run TRUST4 and was generated according to manual.
+
+```
+run-trust4 -b possorted_genome_bam.bam --barcode CB -f GRCm38_bcrtcr.fa
+```
+This will create, among other things, an output file `TRUST_possorted_genome_bam_barcode_report.tsv` that needs to be renamed to `TRUST_data.tsv` and placed to directory with scripts below.
+
+6. Run, preferably in RStudio, consecutively. 
+
+* `Exp43_sc_Hashtags.Rmd`
+* `Exp43_sc_prep.Rmd`
 
 

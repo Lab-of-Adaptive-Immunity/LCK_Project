@@ -1,0 +1,3 @@
+fastqs,sample,library_type
+/path/to/GitHub/directory/Fastqs,LCK_CSP_lib,Antibody Capture
+/path/to/GitHub/directory/Fastqs,LCK_GEX_lib,Gene Expression

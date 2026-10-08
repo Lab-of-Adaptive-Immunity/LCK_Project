@@ -41,7 +41,7 @@ dir.create("Datasets", showWarnings = FALSE, recursive = TRUE)
 Load matrix.
 
 ```{r}
-gex <- Read10X_h5('Exp_21_W1/raw_feature_bc_matrix.h5')
+gex <- Read10X_h5('Lck1/raw_feature_bc_matrix.h5')
 
 # ID of experiment
 experiment.ID <- 'exp21'
