@@ -39,6 +39,12 @@ source('VDJ_TRUST4_import.R')
 `%nin%` = Negate(`%in%`)
 ```
 
+Create directory, where data sets will be stored.
+
+```{r}
+dir.create("Datasets", showWarnings = FALSE, recursive = TRUE)
+```
+
 Get cell cycle genes.
 
 ```{r}

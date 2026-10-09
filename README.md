@@ -52,7 +52,7 @@ The directory **scRNAseq2** contains:
 Before running analysis, you need to make sure you have:
 * Cell ranger 5.0.1 installed that can be run with cellranger command;
 * All required packages for R (see scripts);
-* GRCm38 reference/transcriptome, which was made according to the instructions for Cell ranger v5.0.1 from Ensembl primary assembly MM file, version 102);
+* GRCm39 reference/transcriptome, which was made according to the instructions for Cell ranger v5.0.1 from Ensembl primary assembly MM file, version 109);
 
 Afterwards, you need to clone this project. You'll end up with Project_Adrenalitis directory with sub-directories and contents described above
 
@@ -120,7 +120,9 @@ where /path/to/transcriptome/GRCm38_v102 is path to your reference/transcriptome
 
 * `Exp21_W1_preparation.Rmd`
 
-You need to specify the 
+This step will generate data sets 
+
+5.
 
 ## Analysis of Adrenalitis single cell data - second batch
 
@@ -137,14 +139,18 @@ cd Fastqs
 cd .. # Return to root of project
 ```
 
-3. Perform mapping. Before starting with mapping itself, you need to have your GRCm39 v102 reference ready (see above) and you need to modify `Adrenals_Library.csv` by replacing **/path/to/GitHub/directory/** with **your current path** (ie. if you cloned directory to path `/home/johndoe/`, then the `/path/to/GitHub/directory/` would be replaced by `/home/johndoe/Project_Adrenalitis/`). Once done, you run the nalaysis with command: 
+3. Perform mapping. Before starting with mapping itself, you need to have your GRCm39 v109 reference ready (see above) and you need to modify `Adrenals_Library.csv` by replacing **/path/to/GitHub/directory/** with **your current path** (ie. if you cloned directory to path `/home/johndoe/`, then the `/path/to/GitHub/directory/` would be replaced by `/home/johndoe/Project_Adrenalitis/`). Once done, you run the nalaysis with command: 
 
 ```
-cellranger count --id=Lck2 --transcriptome=/path/to/transcriptome/GRCm38_v102 --libraries=LCK_Library2.csv --feature-ref=FeatureReference.csv --localcores=8
+cellranger count --id=Lck2 --transcriptome=/path/to/transcriptome/GRCm39_v109 --libraries=LCK_Library2.csv --feature-ref=FeatureReference.csv --localcores=8
 ```
 where /path/to/transcriptome/GRCm38_v102 is path to your reference/transcriptome (see above) and FeatureReference.csv is provided here (see above; it is also available in GEON NCBI but it lacks one sample that is not used at the end). --localcores specifies the number of cores and number should be lower or equal to the number of cores your PC has.
 
-4. Perform mapping on custom reference made using `GRCm39.Lck.WT.KO.gtf`. The command is similar as above, but the reference made using this GTF file will account only for Lck reads and distinguish between those that come from WT Lck and those that may come from KO.
+4. Perform mapping on custom reference made using `GRCm39.Lck.WT.KO.gtf`. The command is similar as above, but the reference made using this GTF file will account only for Lck reads and distinguish between those that come from WT Lck and those that may come from KO. The reference (here called `GRCm38_v102_Lck_isoforms`) was made according to the 10X manual from provided GTF file and the same FASTA as the one used for full reference (GRCm39 Ensembl v109).
+
+```
+cellranger count --id=Lck2 --transcriptome=/path/to/transcriptome/GRCm38_v102_Lck_isoforms --libraries=LCK_Library2.csv --feature-ref=FeatureReference.csv --localcores=8
+```
 
 5. Use TRUST4 to create VDJ. This is done on BAM file created in previous step. The fasta file `GRCm38_bcrtcr.fa` is necessary to run TRUST4 and was generated according to manual.
 
@@ -153,9 +159,17 @@ run-trust4 -b possorted_genome_bam.bam --barcode CB -f GRCm38_bcrtcr.fa
 ```
 This will create, among other things, an output file `TRUST_possorted_genome_bam_barcode_report.tsv` that needs to be renamed to `TRUST_data.tsv` and placed to directory with scripts below.
 
-6. Run, preferably in RStudio, consecutively. 
+6. Run, in following order and preferably in RStudio, consecutively. 
 
 * `Exp43_sc_Hashtags.Rmd`
 * `Exp43_sc_prep.Rmd`
 
+The first step will create hashtag designations for groups, the second will create initial data set.
 
+7. Run first analysis.
+
+8. Once analysis done, run this script to filter cells by Lck reads and TCR sequences:
+
+* `Exp43_sc_import_spec_Lck_data.Rmd`
+
+9. Run second analysis.
